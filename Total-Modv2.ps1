@@ -3,6 +3,111 @@ $Mount     = "C:\Mount"
 $Payload   = "C:\Payload"
 $IsoName   = "OSDCloud-LiveWinRE"
 
+# ========================
+# PREREQUISITES - SCOOP
+# ========================
+Set-ExecutionPolicy Bypass -Scope Process -Force
+
+# Check if Scoop is already installed
+if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing Scoop with admin privileges..."
+    iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
+}
+else {
+    Write-Host "Scoop is already installed"
+}
+
+# Install Git first (required for Scoop buckets)
+Write-Host "Installing Git (required for Scoop)..."
+scoop install git
+
+# Configure buckets
+Write-Host "Adding buckets..."
+scoop bucket add extras
+scoop bucket add java
+scoop bucket add versions
+scoop bucket add nonportable
+
+Write-Host "Updating Scoop..."
+scoop update
+
+# Install apps with correct names
+Write-Host "Installing required applications..."
+$appsToInstall = @(
+    @{ name = "powershell-core"; alt = "pwsh" },
+    @{ name = "7zip"; alt = "7z" },
+    @{ name = "temurin8-jre"; alt = "java" },
+    @{ name = "microsoft-edge"; alt = "edge" },
+    @{ name = "dotnet-runtime"; alt = $null },
+    @{ name = "cairo"; alt = $null }
+)
+
+foreach ($appConfig in $appsToInstall) {
+    $appName = $appConfig.name
+    Write-Host "Attempting to install $appName..."
+    scoop install $appName 2>$null
+    
+    if ($LASTEXITCODE -ne 0) {
+        if ($appConfig.alt) {
+            Write-Host "Trying alternative name: $($appConfig.alt)..."
+            scoop install $appConfig.alt 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $appName = $appConfig.alt
+                Write-Host "Successfully installed $appName"
+            } else {
+                Write-Warning "Failed to install $appName or alternative, continuing..."
+            }
+        } else {
+            Write-Warning "Failed to install $appName, continuing..."
+        }
+    } else {
+        Write-Host "Successfully installed $appName"
+    }
+}
+
+# Prepare Payload folder
+Remove-Item $Payload -Recurse -Force -ErrorAction SilentlyContinue
+New-Item $Payload -ItemType Directory | Out-Null
+
+# Map of original names to actual installed app names
+# Install apps with correct names
+Write-Host "Installing required applications..."
+$appsToInstall = @(
+    @{ name = "powershell-core"; alt = "pwsh" },
+    @{ name = "7zip"; alt = "7z" },
+    @{ name = "temurin8-jre"; alt = "java" },
+    @{ name = "googlechrome"; alt = "edge" },
+    @{ name = "dotnet10-sdk"; alt = $null },
+    @{ name = "cairo-desktop"; alt = $null }
+)
+
+foreach ($originalName in $appMapping.Keys) {
+    $possibleNames = $appMapping[$originalName]
+    $found = $false
+    
+    foreach ($possibleName in $possibleNames) {
+        $appPath = "$env:USERPROFILE\scoop\apps\$possibleName\current"
+        if (Test-Path $appPath) {
+            Write-Host "Copying $possibleName to Payload..."
+            Copy-Item $appPath "$Payload\$possibleName" -Recurse -Force -ErrorAction SilentlyContinue
+            $found = $true
+            break
+        }
+    }
+    
+    if (-not $found) {
+        Write-Warning "Could not find $originalName (tried: $($possibleNames -join ', ')) - skipping"
+    }
+}
+
+if (Test-Path "C:\Windows\Fonts\segoeui.ttf") {
+    Write-Host "Copying segoeui.ttf to Payload..."
+    Copy-Item "C:\Windows\Fonts\segoeui.ttf" "$Payload\" -Force
+}
+
+# ========================
+# OSD CLOUD SETUP
+# ========================
 Install-Module OSD -Force -Scope CurrentUser
 Import-Module OSD
 
@@ -13,37 +118,6 @@ Edit-OSDCloudWinPE `
  -CloudDriver * `
  -WirelessConnect `
  -StartOSDCloudGUI
-
-# ------------------------
-# SCOOP APPS
-# ------------------------
-Set-ExecutionPolicy Bypass -Scope Process -Force
-$env:SCOOP_USE_ARIA2 = 'false'
-$env:SCOOP_ALLOW_ADMIN = 'true'
-iwr -useb get.scoop.sh | iex
-scoop bucket add extras
-scoop update
-scoop install cairo 7zip semeru8-jre microsoft-edge dotnet-runtime pwsh
-
-Remove-Item $Payload -Recurse -Force -ErrorAction SilentlyContinue
-New-Item $Payload -ItemType Directory | Out-Null
-
-$apps = @(
-"cairo",
-"7zip",
-"semeru8-jre",
-"microsoft-edge",
-"dotnet-runtime",
-"pwsh"
-)
-
-foreach ($app in $apps) {
- Copy-Item `
- "$env:USERPROFILE\scoop\apps\$app\current" `
- "$Payload\$app" -Recurse -Force
-}
-
-Copy-Item "C:\Windows\Fonts\segoeui.ttf" "$Payload\" -Force
 
 # ------------------------
 # MOUNT WINRE
