@@ -1,5 +1,6 @@
 # ============================
 # OSDCloud Live WinRE Builder
+# Cairo + Semeru8 + JAR Support
 # ============================
 
 $Workspace = "C:\OSDCloud\LiveWinRE"
@@ -7,40 +8,39 @@ $Mount     = "C:\Mount"
 $Payload   = "C:\Payload"
 $IsoName   = "OSDCloud-LiveWinRE"
 
-# --- Pre-Reqs ---
-Write-Host "Installing OSD Module..."
 Install-Module OSD -Force -Scope CurrentUser
 Import-Module OSD
 
-# --- Create WinRE Template ---
-Write-Host "Creating WinRE Template..."
 New-OSDCloudTemplate -Name LiveWinRE -WinRE
 Set-OSDCloudWorkspace $Workspace
 
-# Inject WiFi GUI + Drivers
 Edit-OSDCloudWinPE `
  -CloudDriver * `
  -WirelessConnect `
  -StartOSDCloudGUI
 
 # ------------------------
-# SCOOP SETUP (Latest Apps)
+# SCOOP
 # ------------------------
-Write-Host "Installing Scoop..."
 Set-ExecutionPolicy Bypass -Scope Process -Force
 iwr -useb get.scoop.sh | iex
 
 scoop bucket add extras
 scoop update
 
-Write-Host "Installing Payload..."
-scoop install cairo 7zip openjdk17 microsoft-edge dotnet-runtime pwsh
+scoop install cairo 7zip semeru8-jre microsoft-edge dotnet-runtime pwsh
 
-# Prepare Payload Folder
 Remove-Item $Payload -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $Payload -ItemType Directory | Out-Null
 
-$apps = @("cairo","7zip","openjdk17","microsoft-edge","dotnet-runtime","pwsh")
+$apps = @(
+"cairo",
+"7zip",
+"semeru8-jre",
+"microsoft-edge",
+"dotnet-runtime",
+"pwsh"
+)
 
 foreach ($app in $apps) {
     Copy-Item `
@@ -49,7 +49,6 @@ foreach ($app in $apps) {
     -Recurse -Force
 }
 
-# Fonts for WPF + Cairo
 Copy-Item "C:\Windows\Fonts\segoeui.ttf" "$Payload\" -Force
 
 # ------------------------
@@ -64,27 +63,59 @@ Mount-WindowsImage `
  -Index 1 `
  -Path $Mount
 
-# Inject Portable Payload
 New-Item "$Mount\Portable" -ItemType Directory -Force
 Copy-Item "$Payload\*" "$Mount\Portable" -Recurse -Force
-
 Copy-Item "$Payload\segoeui.ttf" "$Mount\Windows\Fonts\" -Force
 
 # ------------------------
-# REMOTE LAUNCHER SCRIPT
+# REGISTRY ENVIRONMENT
+# ------------------------
+reg load HKLM\WinRE "$Mount\Windows\System32\Config\SYSTEM"
+
+reg add HKLM\WinRE\ControlSet001\Control\Session Manager\Environment `
+ /v JAVA_HOME `
+ /t REG_SZ `
+ /d X:\Portable\semeru8-jre `
+ /f
+
+reg add HKLM\WinRE\ControlSet001\Control\Session Manager\Environment `
+ /v Path `
+ /t REG_EXPAND_SZ `
+ /d "X:\Portable\semeru8-jre\bin;X:\Portable\pwsh" `
+ /f
+
+reg unload HKLM\WinRE
+
+# ------------------------
+# JAR FILE ASSOCIATION
+# ------------------------
+reg load HKLM\WinRESW "$Mount\Windows\System32\Config\SOFTWARE"
+
+reg add HKLM\WinRESW\Classes\.jar `
+ /ve /t REG_SZ /d jarfile /f
+
+reg add HKLM\WinRESW\Classes\jarfile\shell\open\command `
+ /ve /t REG_SZ `
+ /d "\"X:\Portable\semeru8-jre\bin\javaw.exe\" -jar \"%1\"" `
+ /f
+
+reg unload HKLM\WinRESW
+
+# ------------------------
+# REMOTE SCRIPT
 # ------------------------
 @'
 if (Test-NetConnection 1.1.1.1 -Quiet) {
-    try {
-        Invoke-Expression (
-          Invoke-RestMethod https://yourserver/script.ps1
-        )
-    }
+ try {
+   Invoke-Expression (
+    Invoke-RestMethod https://yourserver/script.ps1
+   )
+ }
 }
 else {
  Add-Type -AssemblyName PresentationFramework
  [System.Windows.MessageBox]::Show(
- "No Network Detected. Please connect Wi-Fi first."
+ "Please connect Wi-Fi first"
  )
 }
 '@ | Out-File `
@@ -92,16 +123,14 @@ else {
 -Encoding ASCII
 
 # ------------------------
-# DESKTOP SHORTCUT
+# DESKTOP
 # ------------------------
-New-Item `
-"$Mount\Users\Default\Desktop" `
- -ItemType Directory -Force
+New-Item "$Mount\Users\Default\Desktop" -ItemType Directory -Force
 
 $Wsh = New-Object -ComObject WScript.Shell
 
 $Shortcut = $Wsh.CreateShortcut(
-"$Mount\Users\Default\Desktop\Company Tool.lnk"
+"$Mount\Users\Default\Desktop\Run Company Tool.lnk"
 )
 
 $Shortcut.TargetPath = "X:\Portable\pwsh\pwsh.exe"
@@ -109,7 +138,7 @@ $Shortcut.Arguments = "-ExecutionPolicy Bypass -File X:\Portable\RemoteLauncher.
 $Shortcut.Save()
 
 # ------------------------
-# SET SHELL TO CAIRO
+# SET CAIRO SHELL
 # ------------------------
 Remove-Item `
 "$Mount\Windows\System32\winpeshl.ini" `
@@ -123,7 +152,7 @@ AppPath = X:\Portable\cairo\CairoDesktop.exe
 -Encoding ASCII
 
 # ------------------------
-# COMMIT IMAGE
+# COMMIT
 # ------------------------
 Dismount-WindowsImage `
  -Path $Mount `
