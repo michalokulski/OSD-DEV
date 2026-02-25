@@ -18,6 +18,8 @@ Edit-OSDCloudWinPE `
 # SCOOP APPS
 # ------------------------
 Set-ExecutionPolicy Bypass -Scope Process -Force
+$env:SCOOP_USE_ARIA2 = 'false'
+$env:SCOOP_ALLOW_ADMIN = 'true'
 iwr -useb get.scoop.sh | iex
 scoop bucket add extras
 scoop update
