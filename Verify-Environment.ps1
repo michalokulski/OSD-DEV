@@ -225,11 +225,18 @@ Write-Host ""
 # ====================================
 Write-Host "[7/8] WinPE Compatibility Check" -ForegroundColor Cyan
 
-# Verify build script doesn't use MSI (sanity check)
+# Verify build script doesn't use MSI / WPF (sanity check)
 $buildScript = Join-Path $scriptDir "Build-OSDCloud-Clean.ps1"
 if (Test-Path $buildScript) {
-    $content = Get-Content $buildScript -Raw
-    if ($content -match '\.msi') {
+    $allLines = Get-Content $buildScript
+
+    # Strip comment-only lines before scanning — prevents false positives from
+    # comments like "# NO .msi" or "# PresentationFramework not available in WinPE"
+    $codeLines   = $allLines | Where-Object { $_ -notmatch '^\s*#' }
+    $codeContent = $codeLines -join "`n"
+
+    # .msi check on code lines only
+    if ($codeContent -match '\.msi') {
         Write-Host "  ERR Build script still references .msi files!" -ForegroundColor Red
         Write-Host "       WinPE has no msiexec.exe — only portable/zip downloads work" -ForegroundColor Yellow
         $errors += "Build script uses .msi downloads (incompatible with WinPE)"
@@ -239,8 +246,8 @@ if (Test-Path $buildScript) {
         Write-Host "  OK  No .msi references in build script (portable-only)" -ForegroundColor Green
     }
 
-    # Check WinXShell download includes wxsUI components
-    if ($content -match 'UI_TrayPanel\.zip' -and $content -match 'UI_WIFI\.zip' -and $content -match 'UI_Volume\.zip') {
+    # WinXShell wxsUI check on full content — these are string literals we want to confirm exist
+    if (($allLines -match 'UI_TrayPanel\.zip') -and ($allLines -match 'UI_WIFI\.zip') -and ($allLines -match 'UI_Volume\.zip')) {
         Write-Host "  OK  WinXShell wxsUI components configured" -ForegroundColor Green
     }
     else {
@@ -248,8 +255,8 @@ if (Test-Path $buildScript) {
         $warnings += "WinXShell wxsUI zips may not be downloaded"
     }
 
-    # Check for WPF dependency (doesn't work in WinPE)
-    if ($content -match 'PresentationFramework') {
+    # WPF check on code lines only
+    if ($codeContent -match 'PresentationFramework') {
         Write-Host "  ERR Build script uses WPF (PresentationFramework) — not available in WinPE" -ForegroundColor Red
         $errors += "WPF dependency detected — will crash in WinPE"
         $allGood = $false
