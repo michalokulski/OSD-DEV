@@ -4,7 +4,7 @@
 # ====================================
 
 param(
-    [string]$Workspace    = "C:\OSDCloud\LiveWinRE",
+    [string]$Workspace    = "C:\OSDCloud\WinRE",
     [string]$Mount        = "C:\Mount",
     [string]$BuildPayload = "C:\BuildPayload"
 )
@@ -20,24 +20,27 @@ function Write-Status {
 }
 
 function Show-Menu {
-    Write-Status "===============================================" -Type Header
-    Write-Status "   OSDCloud Clean WinRE LiveBoot v2.0 - Launcher" -Type Header
-    Write-Status "===============================================" -Type Header
+    Write-Status "================================================" -Type Header
+    Write-Status "   OSDCloud WinRE Builder v3.0 - Launcher" -Type Header
+    Write-Status "   Workspace: $Workspace" -Type Header
+    Write-Status "================================================" -Type Header
     Write-Host ""
-    Write-Host " 1) Full Build (download, customize, create ISO)"
-    Write-Host " 2) Build WinRE Only (prepare WIM customization)"
-    Write-Host " 3) Build ISO Only (from existing WinRE)"
+    Write-Host " -- Deploy ISO (LIBR ZTI only) --" -ForegroundColor DarkGray
+    Write-Host " 1) Full Build  (clean deploy ISO)"
+    Write-Host " 2) Build WinRE Only"
+    Write-Host " 3) Build ISO Only  (from existing WinRE)"
     Write-Host ""
-    Write-Host " 4) Optimize WIM Size"
-    Write-Host " 5) Analyze WIM Content"
+    Write-Host " -- Recovery ISO (HTA boot menu: LIBR + Desktop tools) --" -ForegroundColor DarkGray
+    Write-Host " 4) Recovery ISO -- Baked-In  (tools in WIM, ~350 MB larger)"
+    Write-Host " 5) Recovery ISO -- On-Demand  (lighter WIM, tools download at boot)"
     Write-Host ""
-    Write-Host " 6) Open Workspace Folder"
-    Write-Host " 7) View README Documentation"
-    Write-Host " 8) Check Build Status"
-    Write-Host " 9) Verify Environment (pre-flight checks)"
+    Write-Host " -- Maintenance --" -ForegroundColor DarkGray
+    Write-Host " 6) Optimize WIM Size"
+    Write-Host " 7) Analyze WIM Content"
+    Write-Host " 8) Open Workspace Folder"
+    Write-Host " 9) Verify Environment  (pre-flight checks)"
     Write-Host ""
-    Write-Host " C) Clean Build Artifacts (prepare for fresh run)" -ForegroundColor Yellow
-    Write-Host ""
+    Write-Host " C) Clean Build Artifacts  (prepare for fresh run)" -ForegroundColor Yellow
     Write-Host " 0) Exit"
     Write-Host ""
 }
@@ -139,72 +142,47 @@ function Invoke-Menu {
                 Clear-Host
             }
             '4' {
+                Write-Status "Building Recovery ISO (Baked-In tools)..." -Type Success
+                Write-Status "Downloads Chrome, 7-Zip and IBM Semeru JRE 8 into the WIM -- allow 20+ min" -Type Warning
+                & "$PSScriptRoot\Build-Recovery-BakedIn.ps1" -Workspace $Workspace
+                Write-Status "Recovery (Baked-In) ISO complete!" -Type Success
+                Read-Host "Press Enter to continue"
+                Clear-Host
+            }
+            '5' {
+                Write-Status "Building Recovery ISO (On-Demand tools)..." -Type Success
+                Write-Status "Tools download at WinPE boot -- requires network + 4 GB RAM on target machine" -Type Warning
+                & "$PSScriptRoot\Build-Recovery-OnDemand.ps1" -Workspace $Workspace
+                Write-Status "Recovery (On-Demand) ISO complete!" -Type Success
+                Read-Host "Press Enter to continue"
+                Clear-Host
+            }
+            '6' {
                 Write-Status "Starting WIM optimization (may take several minutes)..." -Type Warning
                 & "$PSScriptRoot\Optimize-WinRE.ps1" -Operation OptimizeAll -Workspace $Workspace
                 Write-Status "Optimization complete!" -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
-            '5' {
+            '7' {
                 Write-Status "Analyzing WIM content..." -Type Success
                 & "$PSScriptRoot\Optimize-WinRE.ps1" -Operation Analyze -Workspace $Workspace
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
-            '6' {
+            '8' {
                 Write-Status "Opening workspace: $Workspace" -Type Info
                 if (Test-Path $Workspace) {
+                    # Show ISO/WIM status before opening
+                    $iso = Get-ChildItem "$Workspace\*.iso" -ErrorAction SilentlyContinue | Select-Object -Last 1
+                    if ($iso) { Write-Status "ISO: $($iso.Name)  ($([math]::Round($iso.Length/1GB,2)) GB)" -Type Success }
+                    $wim = "$Workspace\Media\sources\boot.wim"
+                    if (Test-Path $wim) { Write-Status "WIM: $([math]::Round((Get-Item $wim).Length/1MB,1)) MB" -Type Success }
                     explorer.exe $Workspace
                 }
                 else {
-                    Write-Host "Workspace not found!" -ForegroundColor Red
+                    Write-Status "Workspace not found -- it will be created on first build." -Type Warning
                 }
-                Read-Host "Press Enter to continue"
-                Clear-Host
-            }
-            '7' {
-                Write-Status "Opening README..." -Type Info
-                $readmeFile = "$PSScriptRoot\README.md"
-                if (Test-Path $readmeFile) {
-                    notepad.exe $readmeFile
-                }
-                else {
-                    Write-Host "README.md not found!"
-                    Read-Host "Press Enter to continue"
-                }
-                Clear-Host
-            }
-            '8' {
-                Clear-Host
-                Write-Status "Build Status Report" -Type Header
-                Write-Host ""
-                
-                if (Test-Path $Workspace) {
-                    Write-Status "Workspace: $Workspace" -Type Info
-                    
-                    $iso = Get-ChildItem "$Workspace\*.iso" -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($iso) {
-                        $sizeGB = $iso.Length / 1GB
-                        Write-Status "ISO: $(Split-Path $iso -Leaf) - $([math]::Round($sizeGB, 2)) GB" -Type Success
-                    }
-                    else {
-                        Write-Status "ISO: Not yet created" -Type Warning
-                    }
-                    
-                    $wim = "$Workspace\Media\sources\boot.wim"
-                    if (Test-Path $wim) {
-                        $sizeMB = (Get-Item $wim).Length / 1MB
-                        Write-Status "WIM: boot.wim - $([math]::Round($sizeMB, 1)) MB" -Type Success
-                    }
-                    else {
-                        Write-Status "WIM: Not yet created" -Type Warning
-                    }
-                }
-                else {
-                    Write-Status "Workspace not found. Create with Build menu first." -Type Warning
-                }
-                
-                Write-Host ""
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
@@ -238,6 +216,8 @@ try {
     # Verify scripts exist
     $scripts = @(
         "$PSScriptRoot\Build-OSDCloud-Clean.ps1",
+        "$PSScriptRoot\Build-Recovery-BakedIn.ps1",
+        "$PSScriptRoot\Build-Recovery-OnDemand.ps1",
         "$PSScriptRoot\Optimize-WinRE.ps1",
         "$PSScriptRoot\Verify-Environment.ps1"
     )

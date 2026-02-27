@@ -1,18 +1,19 @@
 # OSDCloud Clean WinRE LiveBoot - Complete Guide
 
-**Version:** 2.0.0  
+**Version:** 3.0.0  
 **Date:** February 2026  
 **Status:** Production Ready
 
 ## Overview
 
 A complete, production-ready Windows PE/WinRE distribution based on OSD (OSDeploy) framework:
-- ✅ Java 8 (IBM Semeru/OpenJ9), Chrome, PowerShell 7, WinXShell GUI
-- ✅ ~400-500MB final ISO (optimized)
+- ✅ OSD-native build pipeline — no manual DISM WIM mounting
+- ✅ **Deploy ISO** (`Build-OSDCloud-Clean.ps1`) — ZTI/GUI LIBR deployment, minimal footprint
+- ✅ **Recovery ISO** (`Build-Recovery-BakedIn.ps1`) — HTA boot menu: LIBR deploy OR full desktop (Chrome, 7-Zip, Java Semeru 8 baked in)
+- ✅ **Recovery ISO** (`Build-Recovery-OnDemand.ps1`) — same HTA menu but lighter WIM; tools download at boot
 - ✅ No Scoop dependencies — direct portable downloads only
 - ✅ Driver injection support (`Drivers\` folder + `-DriversPath` parameter)
 - ✅ Custom wallpaper support (`-WallpaperPath` parameter)
-- ✅ WinXShell lightweight desktop shell (10MB)
 - ✅ Clean system deployments
 
 ## Architecture
@@ -27,46 +28,66 @@ OSD-DEV/
 │   └── README.md
 └── README.md                         (This file)
 
-C:\OSDCloud\LiveWinRE\               (Generated output)
-├── OSDCloud-LiveWinRE-Clean.iso      (Bootable ISO)
+C:\OSDCloud\WinRE\                   (Generated output)
+├── OSDCloud.iso                       (Bootable ISO)
 └── Media/sources/boot.wim            (Customized WinPE kernel)
 ```
 
 ## Components
 
 ### 1. **Build-OSDCloud-Clean.ps1**
-Main build orchestrator that:
-- Downloads and prepares applications
-- Creates OSD WinRE template
-- Customizes WinRE with tools
-- Configures registry and environment variables
-- Generates launchers and shortcuts
-- Creates final ISO
+Deploy-only ISO builder. Uses native OSD cmdlets exclusively — no manual WIM mounting. Produces a ZTI or GUI-mode deployment ISO for LIBR.
 
 **Parameters:**
 ```powershell
--Mode          : BuildWinRE | BuildISO | Full (default: Full)
--Workspace     : Path to workspace (default: C:\OSDCloud\LiveWinRE)
--Mount         : WIM mount point (default: C:\Mount)
--BuildPayload  : Download/staging area (default: C:\BuildPayload)
--IsoName       : ISO filename (default: OSDCloud-LiveWinRE-Clean)
--DriversPath   : Path to extra .inf drivers to inject (default: .\Drivers)
--WallpaperPath : Custom wallpaper for WinXShell desktop (optional)
+-Mode          : Full | BuildWinRE | BuildISO (default: Full)
+-Workspace     : Output path (default: C:\OSDCloud\WinRE)
+-BootMode      : ZTI | GUI (default: ZTI)
+-OSName        : e.g. 'Windows 11 24H2 x64'
+-OSLanguage    : e.g. en-us
+-OSEdition     : e.g. Enterprise
+-OSActivation  : Volume | Retail
+-CloudDriver   : Driver pack array (default: @('*'))
+-WirelessConnect : Include WiFi init in startnet.cmd
+-DriversPath   : Path to extra .inf drivers to inject
+-WallpaperPath : Custom .jpg wallpaper for WinPE desktop
+-ForceTemplate : Rebuild OSDCloud Template even if it exists
 ```
 
-**Usage Examples:**
+**Usage:**
 ```powershell
-# Full build (download, customize, create ISO)
+# Full build
 .\Build-OSDCloud-Clean.ps1 -Mode Full
 
-# Only customize WinRE without ISO
-.\Build-OSDCloud-Clean.ps1 -Mode BuildWinRE
+# ZTI with specific OS
+.\Build-OSDCloud-Clean.ps1 -OSName 'Windows 11 24H2 x64' -OSEdition Enterprise
 
-# Only create ISO from existing WinRE
+# ISO only from existing WinRE
 .\Build-OSDCloud-Clean.ps1 -Mode BuildISO
 ```
 
-### 2. **Optimize-WinRE.ps1**
+### 2. **Build-Recovery-BakedIn.ps1**
+Recovery ISO builder. Downloads Chrome, 7-Zip and IBM Semeru JRE 8 to `$Workspace\Config\Tools\`  
+during build. OSD's `Edit-OSDCloudWinPE` Robocopy-mirrors `Config\` into the WIM automatically.  
+At boot: HTA menu offers LIBR ZTI deploy or a full Recovery Desktop (explorer.exe + shortcuts).
+
+```powershell
+.\Build-Recovery-BakedIn.ps1
+.\Build-Recovery-BakedIn.ps1 -StagingPath D:\Downloads  # custom download cache
+```
+
+### 3. **Build-Recovery-OnDemand.ps1**
+Same HTA boot menu as BakedIn, but the WIM carries no pre-staged tools.  
+When the user selects "Windows Recovery OS", `Start-RecoveryMode-OnDemand.ps1` runs inside WinPE  
+and downloads Chrome, 7-Zip and Java into `X:\RecoveryTools\` on the RAM disk.
+
+> Requires ~350 MB free on `X:\`. Machine should have **at least 4 GB RAM**. Network must be connected.
+
+```powershell
+.\Build-Recovery-OnDemand.ps1
+```
+
+### 4. **Optimize-WinRE.ps1**
 
 WIM size optimization utility:
 - `CleanupTemp` — Remove temp files, logs, caches from mounted WIM
@@ -78,7 +99,7 @@ WIM size optimization utility:
 **Parameters:**
 ```powershell
 -Operation : CleanupTemp | CompressWIM | RemoveBlob | OptimizeAll | Analyze (default: OptimizeAll)
--Workspace : Path to workspace (default: C:\OSDCloud\LiveWinRE)
+-Workspace : Path to workspace (default: C:\OSDCloud\WinRE)
 -Mount     : WIM mount point (default: C:\Mount)
 ```
 
@@ -115,11 +136,10 @@ WIM size optimization utility:
 ```
 
 **Expected Output:**
-- ✓ Downloads: Java, Chrome, WinXShell, PowerShell (~1-2GB total)
 - ✓ Creates OSD WinRE template
-- ✓ Customizes with tools and scripts
-- ✓ Generates ISO file (~400-500MB)
-- ⏱ Total time: 45-60 minutes
+- ✓ Customizes WinPE with OSD built-ins (7za, WiFi, cloud drivers)
+- ✓ Generates ISO file (~300-400 MB)
+- ⏱ Total time: 5-15 minutes (no app downloads)
 
 ### Step 3: (Optional) Optimize Size
 ```powershell
@@ -132,48 +152,68 @@ Typical size reduction: **20-30%**
 
 ```powershell
 # Find ISO
-Get-Item "C:\OSDCloud\LiveWinRE\*.iso"
+Get-Item "C:\OSDCloud\WinRE\*.iso"
 ```
 
 Burn to USB with **Ventoy** or **Rufus**, then boot.
 
+### Boot Sequence (Recovery ISO)
+
+```
+wpeinit
+  └ Initialize-OSDCloudStartnet   (WiFi drivers)
+  └ Initialize-OSDCloudStartnetUpdate  (module refresh)
+  └ mshta.exe Select-Mode.hta      (HTA boot menu)
+        ├─ LIBR button     → PowerShell Start-OSDCloud -ZTI -Restart
+        └─ Recovery button → PowerShell Start-RecoveryMode[OnDemand].ps1
+                                └ creates desktop shortcuts
+                                └ sets JAVA_HOME / PATH
+                                └ Start-Process explorer.exe
+```
+
 ## What Gets Installed
 
-Applications are downloaded as portable archives (no MSI/Scoop) and staged to `X:\Tools` inside the WinPE image:
+Applications are portable (no MSI/Scoop) and staged into the WIM via OSD's automatic `Config\` Robocopy.
 
-| Component | Version | Size | Location in WinPE |
-|-----------|---------|------|-------------------|
-| IBM Semeru JRE 8 (OpenJ9) | 8u latest | ~150MB | `X:\Tools\java` |
-| Google Chrome (portable) | Latest | ~100MB | `X:\Tools\chrome` |
-| PowerShell 7 | 7.4.x | ~40MB | `X:\Tools\pwsh` |
-| WinXShell | 0.2.x | ~10MB | `X:\Tools\winxshell` |
-| 7-Zip | Latest | ~5MB | `X:\Tools\7zip` |
+**Deploy ISO** (`Build-OSDCloud-Clean.ps1`) — no extra tools; WinPE uses OSD built-ins only.
 
-Environment variables set in WinPE registry:
-- `JAVA_HOME = X:\Tools\java`
-- `PATH` extended with `X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\chrome;X:\Tools\winxshell;X:\Tools\7zip`
+**Recovery ISOs** — tools at `X:\OSDCloud\Config\Tools\` (BakedIn) or `X:\RecoveryTools\` (OnDemand):
+
+| Component | Version | Size | In WinPE |
+|-----------|---------|------|----------|
+| IBM Semeru JRE 8 (OpenJ9) | 8u422+ | ~150 MB | `...\Tools\java` |
+| Google Chrome (portable) | 131+ | ~170 MB | `...\Tools\chrome` |
+| 7-Zip (FM + CLI) | 24.09 | ~5 MB | `...\Tools\7zip` |
+| 7za.exe (CLI only) | built-in | ~1 MB | `X:\Windows\System32\7za.exe` (all ISOs) |
+
+Environment variables set in WinPE at Recovery Desktop launch:
+- `JAVA_HOME = ...\Tools\java`
+- `PATH` extended with `java\bin`, `chrome`, `7zip`
 
 ## Included Launchers
 
-When booted, users can access:
+**Deploy ISO** boots directly into startnet.cmd which calls `Start-OSDCloud` with ZTI/GUI parameters.
 
-**Desktop Shortcuts:**
-- 📋 **OSD Deploy** - Launch system deployment
-- 🔵 **Chrome Browser** - Web access
-- 💻 **PowerShell** - Management console
-- 📁 **File Explorer** - Filesystem browsing
+**Recovery ISO** boots into the HTA menu (`Select-Mode.hta`):
 
-**Mode Selector:**
-Boots into menu to choose:
-- **Deploy Mode** - Runs OSD deployment wizard
-- **Desktop Mode** - Returns to WinXShell desktop with tools
+| Button | Action |
+|--------|--------|
+| **LIBR** | Runs `Start-OSDCloud -ZTI -Restart` (full automated deploy) |
+| **Windows Recovery OS** | Runs `Start-RecoveryMode[OnDemand].ps1` → desktop + shortcuts |
+
+**Recovery Desktop Shortcuts** (created by Start-RecoveryMode):
+- **Chrome Browser** — portable, no first-run, custom profile dir
+- **7-Zip** — 7zFM.exe GUI file manager
+- **Java Prompt (Semeru 8)** — cmd.exe with `JAVA_HOME` pre-set
+- **LIBR — OSD Deploy** — launches `Start-OSDCloudGUI` in PowerShell
 
 ## Advanced Customization
 
-### Add Applications
-1. Add download logic in `Invoke-ApplicationPrep` in [Build-OSDCloud-Clean.ps1](Build-OSDCloud-Clean.ps1)
-2. Use portable zip format (no `.msi` — WinPE has no `msiexec`)
-3. Extract to `$tools\<appname>` in `$BuildPayload\tools`
+### Add Applications to Recovery Desktop
+1. Add download logic in `Invoke-RecoveryToolsDownload` in [Build-Recovery-BakedIn.ps1](Build-Recovery-BakedIn.ps1)
+2. Use portable zip/exe format (no `.msi` — WinPE has no `msiexec`)
+3. Extract to `$Workspace\Config\Tools\<appname>` — OSD Robocopy injects it automatically
+4. Add a desktop shortcut call in `Start-RecoveryMode.ps1` (written by `Invoke-WriteWinPEScripts`)
 
 ### Custom Drivers
 
@@ -253,11 +293,12 @@ Get-Process | Where-Object {$_.Name -like '*dism*'} | Stop-Process -Force
 ### Regular Tasks
 
 ```powershell
-# Update component URLs in Build-OSDCloud-Clean.ps1 when new versions release:
+# Update component URLs when new versions release:
 # - IBM Semeru JRE 8: https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases
-# - Chrome: URL auto-resolves to latest
-# - PowerShell 7: https://github.com/PowerShell/PowerShell/releases
-# - WinXShell: https://github.com/slorelee/wimbuilder2
+# - Chrome: https://dl.google.com/release2/chrome/ (inspect network traffic for uncompressed URL)
+# - 7-Zip: https://www.7-zip.org/download.html
+# URLs are parameters on Build-Recovery-BakedIn.ps1 and Build-Recovery-OnDemand.ps1
+# e.g.: .\Build-Recovery-BakedIn.ps1 -ChromeUrl "https://...new-url..."
 ```
 
 ### Rebuild Frequency
@@ -275,7 +316,6 @@ Get-Process | Where-Object {$_.Name -like '*dism*'} | Stop-Process -Force
 ## Support & Resources
 
 - **OSD Module**: <https://osdcloud.osdeploy.com>
-- **WinXShell**: <https://github.com/slorelee/wimbuilder2>
 - **IBM Semeru Runtimes**: <https://developer.ibm.com/languages/java/semeru-runtimes>
 - **OSDeploy Community**: <https://www.osdeploy.com>
 
@@ -291,10 +331,19 @@ To improve this project:
 
 - **OSD Module**: MIT License — [OSDeploy](https://github.com/OSDeploy/OSD)
 - **Windows PE**: Microsoft License
-- **WinXShell**: MIT License — [slorelee/wimbuilder2](https://github.com/slorelee/wimbuilder2)
 - **IBM Semeru Runtimes**: IBM open-source license
 
 ## Changelog
+
+### v3.0.0 (February 2026)
+- ✨ Replaced manual DISM WIM-mount pipeline with native OSD cmdlet calls
+- ✨ Removed WinXShell, PowerShell 7 — WinRE native `explorer.exe` + `Start-OSDCloudGUI` used instead
+- ✨ Added `Build-Recovery-BakedIn.ps1` — HTA dual-mode boot menu, tools baked into WIM
+- ✨ Added `Build-Recovery-OnDemand.ps1` — same HTA menu, tools downloaded at WinPE boot
+- ✨ Tool paths moved from `X:\Tools\` to `X:\OSDCloud\Config\Tools\` (OSD Config injection)
+- ✨ `Quick-Launch.ps1` updated with Recovery ISO menu entries (options 4 and 5)
+- ✨ `Verify-Environment.ps1` updated to check all 5 build scripts
+- ✨ Default workspace changed from `C:\OSDCloud\LiveWinRE` to `C:\OSDCloud\WinRE`
 
 ### v2.0.0 (February 2026)
 - ✨ Replaced Cairo shell with WinXShell (10MB vs 20MB)

@@ -8,7 +8,7 @@
 Clear-Host
 
 Write-Host "=======================================================" -ForegroundColor Magenta
-Write-Host "  OSDCloud Clean WinRE - Environment Verification  v2.0" -ForegroundColor Magenta
+Write-Host "  OSDCloud WinRE Builder - Environment Verification  v3.0" -ForegroundColor Magenta
 Write-Host "=======================================================" -ForegroundColor Magenta
 Write-Host ""
 
@@ -76,9 +76,11 @@ Write-Host ""
 Write-Host "[2/8] Required Scripts" -ForegroundColor Cyan
 
 $scripts = @{
-    'Build-OSDCloud-Clean.ps1' = 'Main build orchestrator'
-    'Optimize-WinRE.ps1'       = 'WIM optimization'
-    'Quick-Launch.ps1'         = 'Interactive launcher'
+    'Build-OSDCloud-Clean.ps1'     = 'Deploy ISO build'
+    'Build-Recovery-BakedIn.ps1'   = 'Recovery ISO -- tools baked in'
+    'Build-Recovery-OnDemand.ps1'  = 'Recovery ISO -- on-demand tools'
+    'Optimize-WinRE.ps1'           = 'WIM optimization'
+    'Quick-Launch.ps1'             = 'Interactive launcher'
 }
 
 foreach ($scriptName in $scripts.Keys) {
@@ -201,10 +203,10 @@ catch {
 
 # Test critical download URLs
 $urls = @{
-    'GitHub (Java/PS7)' = "https://github.com"
-    'Google (Chrome)'   = "https://dl.google.com"
-    '7-Zip.org'         = "https://www.7-zip.org"
-    'GitHub Raw (WinXShell)' = "https://raw.githubusercontent.com"
+    'GitHub (Java releases)' = "https://github.com"
+    'Google (Chrome)'        = "https://dl.google.com"
+    '7-Zip.org'              = "https://www.7-zip.org"
+    'GitHub Raw (scripts)'   = "https://raw.githubusercontent.com"
 }
 
 foreach ($entry in $urls.GetEnumerator()) {
@@ -246,13 +248,20 @@ if (Test-Path $buildScript) {
         Write-Host "  OK  No .msi references in build script (portable-only)" -ForegroundColor Green
     }
 
-    # WinXShell wxsUI check on full content — these are string literals we want to confirm exist
-    if (($allLines -match 'UI_TrayPanel\.zip') -and ($allLines -match 'UI_WIFI\.zip') -and ($allLines -match 'UI_Volume\.zip')) {
-        Write-Host "  OK  WinXShell wxsUI components configured" -ForegroundColor Green
+    # HTA boot menu check — confirm mshta launch is in the recovery scripts
+    $bakedIn  = Join-Path $scriptDir 'Build-Recovery-BakedIn.ps1'
+    $onDemand = Join-Path $scriptDir 'Build-Recovery-OnDemand.ps1'
+    if ((Test-Path $bakedIn) -and (Get-Content $bakedIn -Raw) -match 'mshta\.exe') {
+        Write-Host "  OK  Recovery HTA boot menu configured (Build-Recovery-BakedIn.ps1)" -ForegroundColor Green
+    } else {
+        Write-Host "  WARN Build-Recovery-BakedIn.ps1 not found or missing HTA config" -ForegroundColor Yellow
+        $warnings += "Build-Recovery-BakedIn.ps1 check failed"
     }
-    else {
-        Write-Host "  WARN WinXShell may be missing wxsUI panel components" -ForegroundColor Yellow
-        $warnings += "WinXShell wxsUI zips may not be downloaded"
+    if ((Test-Path $onDemand) -and (Get-Content $onDemand -Raw) -match 'mshta\.exe') {
+        Write-Host "  OK  Recovery HTA boot menu configured (Build-Recovery-OnDemand.ps1)" -ForegroundColor Green
+    } else {
+        Write-Host "  WARN Build-Recovery-OnDemand.ps1 not found or missing HTA config" -ForegroundColor Yellow
+        $warnings += "Build-Recovery-OnDemand.ps1 check failed"
     }
 
     # WPF check on code lines only
@@ -276,7 +285,7 @@ Write-Host ""
 # ====================================
 Write-Host "[8/8] Configuration Paths" -ForegroundColor Cyan
 
-$workspacePath = "C:\OSDCloud\LiveWinRE"
+$workspacePath = "C:\OSDCloud\WinRE"
 if (Test-Path $workspacePath) {
     Write-Host "  INFO Workspace: $workspacePath (exists)" -ForegroundColor Cyan
 
@@ -340,7 +349,9 @@ if ($errors.Count -eq 0 -and $warnings.Count -eq 0) {
     Write-Host "" -ForegroundColor Green
     Write-Host "  Run:" -ForegroundColor Green
     Write-Host "    .\Quick-Launch.ps1                         (Interactive menu)" -ForegroundColor Cyan
-    Write-Host "    .\Build-OSDCloud-Clean.ps1 -Mode Full      (Direct build)" -ForegroundColor Cyan
+    Write-Host "    .\Build-OSDCloud-Clean.ps1 -Mode Full      (Deploy ISO)" -ForegroundColor Cyan
+    Write-Host "    .\Build-Recovery-BakedIn.ps1               (Recovery ISO, tools in WIM)" -ForegroundColor Cyan
+    Write-Host "    .\Build-Recovery-OnDemand.ps1              (Recovery ISO, download at boot)" -ForegroundColor Cyan
     Write-Host ""
 }
 elseif ($errors.Count -eq 0) {
@@ -350,7 +361,8 @@ elseif ($errors.Count -eq 0) {
     $warnings | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
     Write-Host ""
     Write-Host "  You can proceed:" -ForegroundColor Yellow
-    Write-Host "    .\Quick-Launch.ps1" -ForegroundColor Cyan
+    Write-Host "    .\Quick-Launch.ps1  (menu)" -ForegroundColor Cyan
+    Write-Host "    .\Build-OSDCloud-Clean.ps1 -Mode Full" -ForegroundColor Cyan
     Write-Host ""
 }
 else {
