@@ -22,6 +22,7 @@
 | **PROJECT-SUMMARY.md** | Architecture & technical details | 15 min 🔧 |
 | **CHANGES.md** | What changed in refactoring | 5 min 🔄 |
 | **REFACTORING-SUMMARY.md** | Detailed refactoring list | 3 min 📋 |
+| **Drivers/README.md** | Driver injection guide | 2 min 💾 |
 
 ---
 
@@ -55,23 +56,25 @@ Done! Boot and test ISO
 A **production-ready OSDCloud Windows PE/WinRE distribution** with:
 
 ✅ **Components**
-- Java 11 JRE (150MB)
-- Google Chrome (100MB)
-- PowerShell 7.4 (40MB)
-- WinXShell GUI (10MB) ← Lightweight & agnostic
+- IBM Semeru JRE 8 (OpenJ9, ~150MB)
+- Google Chrome portable (~100MB)
+- PowerShell 7.4 (~40MB)
+- WinXShell GUI (10MB) ← Lightweight & WinPE-agnostic
 - OSD Deploy tools
 
 ✅ **Features**
 - ISO-bootable (~400-500MB)
-- CLI and GUI modes
-- Deployment automation
+- ModeSelector at boot (Deploy vs Desktop)
+- WinXShell desktop with shortcuts
+- Driver injection (`Drivers\` folder)
+- Custom wallpaper support
 - Size optimization tools
 - Complete documentation
 
 ✅ **No Requirements**
 - No Scoop dependencies
-- No network boot complexity
-- No Cairo bloat
+- No MSI installers (WinPE-safe)
+- No NetworkBoot complexity
 - Pure WinPE compatible
 
 ---
@@ -114,17 +117,20 @@ A **production-ready OSDCloud Windows PE/WinRE distribution** with:
 
 ### What Changed
 - ✅ Cairo → **WinXShell** (10MB vs 20MB)
-- ✅ **Removed** network boot requirement
-- ✅ **Simplified** build modes (4 → 3)
+- ✅ Java OpenJDK 11 HotSpot → **IBM Semeru JRE 8 OpenJ9** (lighter JVM)
+- ✅ **Removed** NetworkBoot mode
+- ✅ **Simplified** build modes (4 → 3: BuildWinRE, BuildISO, Full)
+- ✅ **Added** `-DriversPath` parameter and `Drivers\` folder
+- ✅ **Added** `-WallpaperPath` parameter
+- ✅ **Added** `Verify-Environment.ps1` with WinPE compatibility checks
 - ✅ **Updated** all documentation
-- ✅ **Cleaner** workflow
 
 ### What Stayed the Same
-- ✅ Java, Chrome, PowerShell all present
+- ✅ Chrome, PowerShell all present
 - ✅ OSD deployment tools included
 - ✅ Same final ISO size (~400-500MB)
 - ✅ Same build quality
-- ✅ Backward compatible
+- ✅ Backward compatible workspace layout
 
 See **CHANGES.md** for full refactoring details.
 
@@ -159,22 +165,22 @@ See **CHANGES.md** for full refactoring details.
 ## ✨ Key Improvements
 
 ### ✅ Simpler
-- Removed network boot requirement
-- Removed Cairo complexity
-- Only 3 build modes (was 4)
+- No Scoop dependency
+- No NetworkBoot requirement
+- Only 3 build modes
 - Cleaner documentation
 
 ### ✅ Lighter
 - WinXShell: 10MB (vs Cairo: 20MB)
+- IBM Semeru OpenJ9: lighter JVM footprint
 - No DHCP/PXE/iPXE setup
 - Fewer build artifacts
-- Same final ISO size, less bloat
 
-### ✅ Better
+### ✅ More Extensible
+- Driver injection from `Drivers\` folder
+- Custom wallpaper via `-WallpaperPath`
 - WinPE-agnostic design
-- Pure Windows compatibility
-- No external dependencies
-- Professional quality
+- Pure Windows PE compatibility
 
 ---
 
@@ -210,6 +216,22 @@ See **CHANGES.md** for full refactoring details.
 .\Quick-Launch.ps1
 ```
 
+### Custom Drivers
+
+```powershell
+# Drop .inf drivers in Drivers\ then build
+.\Build-OSDCloud-Clean.ps1 -Mode Full
+
+# Or specify a custom path
+.\Build-OSDCloud-Clean.ps1 -Mode Full -DriversPath "D:\MyDrivers"
+```
+
+### Custom Wallpaper
+
+```powershell
+.\Build-OSDCloud-Clean.ps1 -Mode Full -WallpaperPath "C:\Images\bg.jpg"
+```
+
 ---
 
 ## 📞 Need Help?
@@ -233,7 +255,6 @@ See **CHANGES.md** for full refactoring details.
 ## 📂 File Structure
 
 ```
-g:\Workspace\OSD-DEV\
 │
 ├─ 📄 Documentation
 │  ├─ START-HERE.md ⭐ (Start here!)
@@ -249,9 +270,8 @@ g:\Workspace\OSD-DEV\
 │  ├─ Optimize-WinRE.ps1 (Optimizer)
 │  └─ Verify-Environment.ps1 (Checker)
 │
-└─ 📚 Old Scripts (Reference)
-   ├─ Total-Modv2.ps1 (Original)
-   └─ Build-OSDCloud-LiveWinRE.ps1 (Original)
+└─ 💾 Drivers\
+   └─ README.md (Driver injection guide)
 ```
 
 ---
@@ -286,11 +306,11 @@ Everything is ready:
 
 ---
 
-**Updated:** February 26, 2026  
+**Updated:** February 2026  
 **Status:** ✅ Production Ready  
-**Components:** Java, Chrome, PowerShell, WinXShell  
+**Components:** Java 8 (IBM Semeru), Chrome, PowerShell 7, WinXShell  
 **Final Size:** 400-500MB  
-**Build Time:** 45-60 min
+**Build Time:** 45-60 min (first time)
 
 ---
 

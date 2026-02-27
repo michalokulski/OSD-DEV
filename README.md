@@ -6,30 +6,30 @@
 
 ## Overview
 
-A modern, clean Windows PE/WinRE distribution based on OSD (OSDeploy) framework, designed for:
-- ✅ Graphical user interface (WinXShell)
-- ✅ PowerShell scripting
-- ✅ Java application support
-- ✅ Chrome web browser
-- ✅ Minimal footprint (< 500MB ISO)
-- ✅ No bloat, no Scoop dependencies
+A complete, production-ready Windows PE/WinRE distribution based on OSD (OSDeploy) framework:
+- ✅ Java 8 (IBM Semeru/OpenJ9), Chrome, PowerShell 7, WinXShell GUI
+- ✅ ~400-500MB final ISO (optimized)
+- ✅ No Scoop dependencies — direct portable downloads only
+- ✅ Driver injection support (`Drivers\` folder + `-DriversPath` parameter)
+- ✅ Custom wallpaper support (`-WallpaperPath` parameter)
+- ✅ WinXShell lightweight desktop shell (10MB)
 - ✅ Clean system deployments
 
 ## Architecture
 
 ```
-OSDCloud-Clean/
+OSD-DEV/
 ├── Build-OSDCloud-Clean.ps1          (Main build script)
 ├── Optimize-WinRE.ps1                (Size optimization)
-├── README.md                          (This file)
-└── Output/
-    ├── OSDCloud-LiveWinRE-Clean.iso  (Bootable ISO)
-    └── NetworkBoot/                  (PXE/iPXE files)
-        ├── boot.wim
-        ├── boot.ipxe
-        ├── pxelinux.cfg/
-        ├── DEPLOYMENT-GUIDE.md
-        └── http_server.py
+├── Quick-Launch.ps1                  (Interactive menu)
+├── Verify-Environment.ps1            (Pre-flight check)
+├── Drivers/                          (Optional .inf driver injection)
+│   └── README.md
+└── README.md                         (This file)
+
+C:\OSDCloud\LiveWinRE\               (Generated output)
+├── OSDCloud-LiveWinRE-Clean.iso      (Bootable ISO)
+└── Media/sources/boot.wim            (Customized WinPE kernel)
 ```
 
 ## Components
@@ -45,9 +45,13 @@ Main build orchestrator that:
 
 **Parameters:**
 ```powershell
--Mode       : BuildWinRE | BuildISO | Full (default: Full)
--Workspace  : Path to workspace (default: C:\OSDCloud\LiveWinRE)
--IsoName    : ISO filename (default: OSDCloud-LiveWinRE-Clean)
+-Mode          : BuildWinRE | BuildISO | Full (default: Full)
+-Workspace     : Path to workspace (default: C:\OSDCloud\LiveWinRE)
+-Mount         : WIM mount point (default: C:\Mount)
+-BuildPayload  : Download/staging area (default: C:\BuildPayload)
+-IsoName       : ISO filename (default: OSDCloud-LiveWinRE-Clean)
+-DriversPath   : Path to extra .inf drivers to inject (default: .\Drivers)
+-WallpaperPath : Custom wallpaper for WinXShell desktop (optional)
 ```
 
 **Usage Examples:**
@@ -63,15 +67,19 @@ Main build orchestrator that:
 ```
 
 ### 2. **Optimize-WinRE.ps1**
-Reduces WIM/ISO size while maintaining functionality:
-- Clean temporary files
-- Compress WIM with max compression
-- Remove unnecessary components
-- Analyze size breakdown
 
-**Operations:**
+WIM size optimization utility:
+- `CleanupTemp` — Remove temp files, logs, caches from mounted WIM
+- `CompressWIM` — Recompress boot.wim with maximum DISM compression
+- `RemoveBlob` — Remove unused system components
+- `OptimizeAll` — Run all of the above in sequence
+- `Analyze` — Mount WIM and show size breakdown by component
+
+**Parameters:**
 ```powershell
--Operation  : CleanupTemp | CompressWIM | RemoveBlob | OptimizeAll | Analyze
+-Operation : CleanupTemp | CompressWIM | RemoveBlob | OptimizeAll | Analyze (default: OptimizeAll)
+-Workspace : Path to workspace (default: C:\OSDCloud\LiveWinRE)
+-Mount     : WIM mount point (default: C:\Mount)
 ```
 
 **Usage:**
@@ -89,16 +97,20 @@ Reduces WIM/ISO size while maintaining functionality:
 ## Quick Start Guide
 
 ### Prerequisites
-- Windows 11/Server 2022 (for WinRE support)
-- Administrator privileges
-- 50GB free disk space
-- PowerShell 5.1+ (7+ recommended)
-- Internet connection for downloads
+- Windows 10/11 or Windows Server 2019/2022
+- PowerShell 5.1+ (run as **Administrator**)
+- ~50GB free disk space
+- Internet connection (first build ~1-2GB downloads)
 
-### Step 1: Build WinRE Distribution
+### Step 1: Verify Environment
 ```powershell
 # Run as Administrator
-cd "g:\Workspace\OSD-DEV"
+.\Verify-Environment.ps1
+```
+
+### Step 2: Build WinRE Distribution
+```powershell
+# Run as Administrator
 .\Build-OSDCloud-Clean.ps1 -Mode Full
 ```
 
@@ -109,15 +121,6 @@ cd "g:\Workspace\OSD-DEV"
 - ✓ Generates ISO file (~400-500MB)
 - ⏱ Total time: 45-60 minutes
 
-### Step 2: Verify the Build
-```powershell
-# Check ISO was created
-Get-ChildItem "C:\OSDCloud\LiveWinRE\*.iso" -Recurse
-
-# Verify WIM payload
-Get-Item "C:\OSDCloud\LiveWinRE\Media\sources\boot.wim"
-```
-
 ### Step 3: (Optional) Optimize Size
 ```powershell
 .\Optimize-WinRE.ps1 -Operation OptimizeAll
@@ -126,30 +129,29 @@ Get-Item "C:\OSDCloud\LiveWinRE\Media\sources\boot.wim"
 Typical size reduction: **20-30%**
 
 ### Step 4: Boot & Test
-**From ISO:**
-- Burn to USB with Ventoy or Rufus
-- Boot computer
-- Select operating mode (Deploy or Desktop)
+
+```powershell
+# Find ISO
+Get-Item "C:\OSDCloud\LiveWinRE\*.iso"
+```
+
+Burn to USB with **Ventoy** or **Rufus**, then boot.
 
 ## What Gets Installed
 
-### Tools & Applications
-| Component | Size | Purpose |
-|-----------|------|---------|
-| OpenJDK 11 JRE | ~150MB | Java application support |
-| Google Chrome | ~100MB | Web browser |
-| PowerShell 7.4 | ~40MB | Modern scripting |
-| WinXShell | ~10MB | Lightweight GUI shell |
-| 7-Zip | ~5MB | Archive handling |
+Applications are downloaded as portable archives (no MSI/Scoop) and staged to `X:\Tools` inside the WinPE image:
 
-### Pre-configured Features
-- ✅ Network (Ethernet + WiFi drivers)
-- ✅ Storage drivers (SATA, NVMe, RAID)
-- ✅ GPU support (basic)
-- ✅ Multi-language support (en-US default)
-- ✅ OSD Deploy tools pre-installed
-- ✅ PowerShell ISE included
-- ✅ WMI and WinRM enabled
+| Component | Version | Size | Location in WinPE |
+|-----------|---------|------|-------------------|
+| IBM Semeru JRE 8 (OpenJ9) | 8u latest | ~150MB | `X:\Tools\java` |
+| Google Chrome (portable) | Latest | ~100MB | `X:\Tools\chrome` |
+| PowerShell 7 | 7.4.x | ~40MB | `X:\Tools\pwsh` |
+| WinXShell | 0.2.x | ~10MB | `X:\Tools\winxshell` |
+| 7-Zip | Latest | ~5MB | `X:\Tools\7zip` |
+
+Environment variables set in WinPE registry:
+- `JAVA_HOME = X:\Tools\java`
+- `PATH` extended with `X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\chrome;X:\Tools\winxshell;X:\Tools\7zip`
 
 ## Included Launchers
 
@@ -168,39 +170,33 @@ Boots into menu to choose:
 
 ## Advanced Customization
 
-### Adding Custom Applications
-1. Add to `$apps` hashtable in Build-OSDCloud-Clean.ps1
-2. Use zip/portable format only (no MSI — WinPE has no msiexec):
-```powershell
-$apps = @{
-    'myapp' = @{ url = 'https://...'; file = 'myapp.zip'; unzip = $true }
-}
+### Add Applications
+1. Add download logic in `Invoke-ApplicationPrep` in [Build-OSDCloud-Clean.ps1](Build-OSDCloud-Clean.ps1)
+2. Use portable zip format (no `.msi` — WinPE has no `msiexec`)
+3. Extract to `$tools\<appname>` in `$BuildPayload\tools`
+
+### Custom Drivers
+
+Place `.inf`-based drivers under `Drivers\` in sub-folders:
+
+```
+Drivers\
+  NIC\Intel-I225\e2f68.inf ...
+  Storage\Samsung-NVMe\samsungnvme.inf ...
+  WiFi\Intel-AX201\netwtw10.inf ...
 ```
 
-### Custom Launcher Scripts
-Edit launcher section in Build-OSDCloud-Clean.ps1:
+Or pass a custom path: `.\Build-OSDCloud-Clean.ps1 -DriversPath "D:\MyDrivers"`
+
+### Custom Wallpaper
+
 ```powershell
-function Invoke-LauncherSetup {
-    # Add your launcher here
-    $customScript = @'
-    # Your script code
-    '@
-    Set-Content -Path "$scriptsDir\YourScript.ps1" -Value $customScript
-}
+.\Build-OSDCloud-Clean.ps1 -Mode Full -WallpaperPath "C:\Images\corp-wallpaper.jpg"
 ```
 
-### Modifying WinPE Appearance
-Mount the boot.wim and customize:
-- Wallpaper: `$Mount\Windows\System32\drivers\etc`
-- Cursor/Theme: Registry modifications
-- Shell behavior: winpeshl.ini changes
+### Registry Changes
 
-### Registry Customization
-Add to Build-OSDCloud-Clean.ps1 before `Dismount-WindowsImage`:
-```powershell
-# Your registry modifications here
-reg add "HKLM\WinRE\..." /v key /t REG_SZ /d value /f
-```
+Modify `Invoke-WinRECustomization` in [Build-OSDCloud-Clean.ps1](Build-OSDCloud-Clean.ps1) to add custom registry keys under the mounted WIM hives.
 
 ## Troubleshooting
 
@@ -224,12 +220,6 @@ $ProgressPreference = 'SilentlyContinue'
 3. Check BIOS boot order
 4. Try Legacy + UEFI boot modes
 
-### Network Boot Not Working
-1. Confirm DHCP Options 66/67 configured
-2. Test from client: `ipconfig /all` shows expected boot server
-3. Verify network connectivity with `ping`
-4. Check TFTP/HTTP server running with `netstat -an`
-
 ### WIM Mount Fails
 ```powershell
 # Force unmount if stuck
@@ -245,108 +235,49 @@ Get-Process | Where-Object {$_.Name -like '*dism*'} | Stop-Process -Force
 2. Clean download cache: `Remove-Item C:\BuildPayload\downloads -Recurse`
 3. Use different workspace: `.\Build-OSDCloud-Clean.ps1 -Workspace "D:\OSD"`
 
-### Registry Changes Don't Persist
-After editing registry in mount, verify:
-1. Hive is correctly loaded (`reg load`)
-2. Changes saved before unmount
-3. WIM dismounted with `-Save` flag
-
 ## Performance Tuning
 
-### Reduce Boot Time
-- Install minimal drivers only (use `-CloudDriver *` judiciously)
-- Remove language packs
-- Optimize WIM compression
-- Use fast storage (SSD for build)
-
-### Reduce Memory Usage
-- Disable unnecessary services in registry
-- Remove debug symbols
-- Minimize image cache
-
-### Network Boot Optimization
-- Use local HTTP server instead of internet downloads
-- Pre-cache WIM on local network
-- Use IPv4 only (IPv6 adds latency)
+- Run on SSD for significantly faster WIM operations
+- Close other applications during build (DISM is CPU/IO intensive)
+- First build is slowest due to downloads; subsequent builds reuse cached workspace
 
 ## Security Considerations
 
-### For Production Deployments
-1. **Network Isolation**
-   - Restrict DHCP to authorized subnets
-   - Use firewall rules
-   - Monitor boot attempts
-
-2. **Access Control**
-   - Implement OSD authentication
-   - Use WDS instead of plain TFTP
-   - Enable logging for audits
-
-3. **Content Security**
-   - Validate downloaded tools checksums
-   - Use signed PowerShell scripts
-   - Implement code signing
-
-4. **Network Security**
-   - Use VPN for sensitive networks
-   - Implement IPsec for boot traffic
-   - Use HTTPS for file downloads
-   - Restrict to trusted VLANs
+- Script requires **Administrator** — review before running in production
+- All downloads are from official sources (IBM, Google, Microsoft, GitHub)
+- No Scoop, no third-party package manager
+- WinPE environment is isolated — no persistent changes to host OS
 
 ## Maintenance & Updates
 
-### Regular Updates
+### Regular Tasks
+
 ```powershell
-# Update URLs in Build-OSDCloud-Clean.ps1 periodically:
-# - Check for Java JRE updates
-# - Chrome updates (auto via MSI)
-# - PowerShell updates
-# - OSD module updates
+# Update component URLs in Build-OSDCloud-Clean.ps1 when new versions release:
+# - IBM Semeru JRE 8: https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases
+# - Chrome: URL auto-resolves to latest
+# - PowerShell 7: https://github.com/PowerShell/PowerShell/releases
+# - WinXShell: https://github.com/slorelee/wimbuilder2
 ```
 
 ### Rebuild Frequency
 - **Monthly**: Check component updates
 - **Quarterly**: Full rebuild with latest versions
-- **As-needed**: Security fixes
-
-### Version Management
-```powershell
-# Track versions in config
-$config = @{
-    JavaVersion = "11.0.21"
-    ChromeVersion = "Latest"
-    PowerShellVersion = "7.4.1"
-    OSDVersion = "Latest"
-}
-```
+- **As-needed**: Security fixes or driver updates
 
 ## Known Limitations
 
-1. **Size**: Must fit on network/USB media (target < 500MB)
-2. **Graphics**: Generic VESA drivers only (may not support GPU accelerationfully)
-3. **Language**: English (en-US) default
-4. **Architecture**: x64 only (x86 not supported)
-5. **Stability**: WinPE is not a full OS, designed for short-term deployments
-6. **Applications**: Limited to what fits in ~500MB WIM
+- WinPE has no `msiexec` — all applications must be portable/zip-based
+- WinPE environment resets on reboot (no persistent storage by default)
+- Chrome may require additional Visual C++ runtimes in some WinPE builds
+- Driver injection requires `.inf` + `.sys` + `.cat` — standalone `.exe` drivers are not supported
 
 ## Support & Resources
 
-### Official Documentation
-- [OSD Module](https://github.com/OSDeploy/OSD)
-- [Windows PE](https://docs.microsoft.com/windows/deployment/windows-pe/windows-pe-intro)
-- [iPXE](https://ipxe.org/)
-
-### Troubleshooting Resources
-- OSD GitHub Issues
-- Windows PE documentation
-- iPXE wiki
-- Community forums
-
-### Getting Help
-1. Check DEPLOYMENT-GUIDE.md
-2. Review logs in build directory
-3. Test components individually
-4. Search OSD documentation
+- **OSD Module**: <https://osdcloud.osdeploy.com>
+- **WinXShell**: <https://github.com/slorelee/wimbuilder2>
+- **IBM Semeru Runtimes**: <https://developer.ibm.com/languages/java/semeru-runtimes>
+- **OSDeploy Community**: <https://www.osdeploy.com>
 
 ## Contributing
 
@@ -358,23 +289,28 @@ To improve this project:
 
 ## License & Attribution
 
-- **OSD Module**: MIT License
+- **OSD Module**: MIT License — [OSDeploy](https://github.com/OSDeploy/OSD)
 - **Windows PE**: Microsoft License
-- **WinXShell**: MIT License
-- **Other components**: Respect original licenses
+- **WinXShell**: MIT License — [slorelee/wimbuilder2](https://github.com/slorelee/wimbuilder2)
+- **IBM Semeru Runtimes**: IBM open-source license
 
 ## Changelog
 
-### v1.0.0 (February 2026)
-- ✨ Initial release
-- ✨ Multi-mode operation (BuildWinRE, BuildISO)
-- ✨ Java + Chrome + PowerShell support
-- ✨ WinXShell lightweight GUI shell
-- ✨ Optimization utilities
-- ✨ Clean architecture (no Scoop)
+### v2.0.0 (February 2026)
+- ✨ Replaced Cairo shell with WinXShell (10MB vs 20MB)
+- ✨ Removed `BuildNetwork` mode — simplified to 3 build modes
+- ✨ Switched Java from OpenJDK 11 (HotSpot) to IBM Semeru JRE 8 (OpenJ9)
+- ✨ Added `-DriversPath` parameter for custom driver injection
+- ✨ Added `-WallpaperPath` parameter for custom desktop background
+- ✨ Added `Drivers\` folder with auto-injection support
+- ✨ Added elapsed build time reporting
+- ✨ New `Verify-Environment.ps1` with WinPE compatibility checks
+
+### v1.0.0 (Initial)
+- Initial release with Scoop-based approach (superseded)
 
 ---
 
-**Last Updated:** February 26, 2026  
-**Tested On:** Windows 11, Server 2022  
+**Last Updated:** February 27, 2026  
+**Tested On:** Windows 11, Windows Server 2022  
 **Status:** ✅ Production Ready

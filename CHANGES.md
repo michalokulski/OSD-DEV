@@ -2,11 +2,14 @@
 
 ## 🎯 What Changed
 
-Your OSDCloud solution has been **completely refactored** to:
+The OSDCloud solution has been **refactored** to:
 
-1. ✅ **Remove NetworkBoot requirements** - No longer needed, simplified workflow
-2. ✅ **Replace Cairo with WinXShell** - Lighter (10MB vs 20MB), fully WinRE compatible, agnostic
-3. ✅ **Update all documentation** - Everything reflects the new approach
+1. ✅ **Remove NetworkBoot requirements** — No longer needed, simplified workflow
+2. ✅ **Replace Cairo with WinXShell** — Lighter (10MB vs 20MB), fully WinPE-agnostic
+3. ✅ **Switch Java runtime** — OpenJDK 11 HotSpot → IBM Semeru JRE 8 OpenJ9 (lighter JVM)
+4. ✅ **Add driver injection** — `-DriversPath` parameter + `Drivers\` folder auto-injection
+5. ✅ **Add wallpaper support** — `-WallpaperPath` parameter for custom desktop background
+6. ✅ **Update all documentation** — Everything reflects the new approach
 
 ---
 
@@ -14,39 +17,56 @@ Your OSDCloud solution has been **completely refactored** to:
 
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
-| **Scripts** | 4 | 3 | ✨ Simpler |
 | **Shell** | Cairo (20MB) | WinXShell (10MB) | ✨ 10MB smaller |
+| **Java** | OpenJDK 11 HotSpot | IBM Semeru 8 OpenJ9 | ✨ Lighter JVM |
 | **Network Boot** | Included | Removed | ✨ Fewer requirements |
 | **Build Modes** | 4 | 3 | ✨ Cleaner |
+| **Driver injection** | Manual | Automatic (`Drivers\`) | ✨ Easier |
+| **Wallpaper** | Fixed | `-WallpaperPath` param | ✨ Customizable |
 | **ISO Size** | 400-500MB | 400-500MB | ✨ Same with less bloat |
-| **Complexity** | High | Low | ✨ Agnostic design |
 
 ---
 
 ## 📝 Files Updated
 
-### Scripts (2 updated)
-- ✅ **Build-OSDCloud-Clean.ps1** (443 → ~420 lines)
-  - Removed BuildNetwork mode
-  - Cairo → WinXShell
+### Scripts Updated
+
+- ✅ **Build-OSDCloud-Clean.ps1**
+  - Removed `BuildNetwork` mode
+  - Cairo → WinXShell (includes all wxsUI panels)
+  - OpenJDK 11 → IBM Semeru JRE 8 (OpenJ9)
+  - Added `-DriversPath` parameter + `Invoke-DriverInjection` function
+  - Added `-WallpaperPath` parameter
+  - Added elapsed build time reporting
+  - Shortcut creation: COM with `.cmd` fallback
   - Removed network boot functions
-  
-- ✅ **Quick-Launch.ps1** (195 → ~180 lines)
+
+- ✅ **Quick-Launch.ps1**
   - Removed network boot menu option
   - Updated validation checks
   - Simplified status reporting
 
-### Documentation (5 updated)
-- ✅ **README.md** - Removed network boot section
-- ✅ **QUICKSTART.md** - Removed network boot references
-- ✅ **START-HERE.md** - Updated overview
-- ✅ **PROJECT-SUMMARY.md** - Complete refactor
-- ✅ **REFACTORING-SUMMARY.md** - NEW (this guide)
+- ✅ **Verify-Environment.ps1**
+  - Added WinPE compatibility check (`.msi` detection)
+  - Added documentation file presence check
+
+### Documentation Updated
+
+- ✅ **README.md** — Complete rewrite reflecting all changes
+- ✅ **QUICKSTART.md** — Updated component list, new parameters
+- ✅ **START-HERE.md** — Updated overview, driver/wallpaper info
+- ✅ **PROJECT-SUMMARY.md** — Complete technical overview update
+- ✅ **INDEX.md** — Updated to reflect current state
+- ✅ **CHANGES.md** — This file
+- ✅ **REFACTORING-SUMMARY.md** — Detailed change reference
+
+### Added
+
+- ✅ **Drivers/README.md** — Driver injection guide
 
 ### Unchanged (Still Valid)
-- ✨ **Optimize-WinRE.ps1** - No changes needed
-- ✨ **Verify-Environment.ps1** - No changes needed
-- ✨ Old scripts still available for reference
+
+- ✨ **Optimize-WinRE.ps1** — No changes needed
 
 ---
 
@@ -71,14 +91,14 @@ Your OSDCloud solution has been **completely refactored** to:
 
 ---
 
-## 🎓 What's Included (Still Complete)
+## 🎓 What's Included (Complete)
 
-✅ **Java** - OpenJDK 11 JRE (150MB)
-✅ **Browser** - Google Chrome (100MB)  
-✅ **Scripting** - PowerShell 7.4 (40MB)
-✅ **GUI** - WinXShell (10MB) ← NEW
-✅ **Tools** - OSD Deploy (pre-configured)
-✅ **Utilities** - 7-Zip, File Manager, Explorer
+✅ **Java** — IBM Semeru JRE 8 (OpenJ9, ~150MB)
+✅ **Browser** — Google Chrome portable (~100MB)
+✅ **Scripting** — PowerShell 7.4 (~40MB)
+✅ **GUI** — WinXShell (10MB) + wxsUI panels ← Lightweight
+✅ **Tools** — OSD Deploy (pre-configured)
+✅ **Compression** — 7-Zip (~5MB)
 
 ---
 
@@ -103,18 +123,15 @@ Your OSDCloud solution has been **completely refactored** to:
 
 ## 📋 What Got Removed & Why
 
-### ❌ NetworkBoot Support
-**Why removed:** Simplified workflow - not required by most users
-**Alternative:** Users can still boot via USB/ISO
-**If you need network boot later:** Can be added back easily
+## 📋 What Got Removed & Why
 
-### ❌ Cairo Desktop
-**Why replaced:** WinXShell is lighter and more agnostic
-**Same functionality:** Both provide GUI file browsing and desktop
-
-### ❌ BuildNetwork mode
-**Why removed:** Simplified build pipeline
-**Result:** BuildWinRE → BuildISO → Done (3 steps, not 4)
+| Feature | Reason |
+|---------|--------|
+| `BuildNetwork` mode | NetworkBoot not required; simplified workflow |
+| `Invoke-NetworkBootPrep` function | Part of NetworkBoot removal |
+| Cairo shell download | Replaced by WinXShell |
+| Network boot menu option (Quick-Launch) | NetworkBoot removed |
+| OpenJDK 11 HotSpot | Replaced by IBM Semeru JRE 8 OpenJ9 (lighter) |
 
 ---
 
@@ -244,7 +261,7 @@ All scripts are heavily commented for customization.
 
 ---
 
-**Refactored:** February 26, 2026  
+**Refactored:** February 2026  
 **Status:** ✅ Production Ready  
-**Changes:** WinXShell + Simplified Workflow  
+**Changes:** WinXShell + IBM Semeru JRE 8 + Drivers\\ + WallpaperPath + Simplified Workflow  
 **Result:** ✨ Better, smaller, cleaner

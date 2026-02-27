@@ -3,9 +3,11 @@
 ## What You Have
 
 A complete, production-ready solution to build a **clean Windows PE/WinRE distribution** with:
-- ✅ Java, Chrome, PowerShell, GUI included
+- ✅ Java 8 (IBM Semeru/OpenJ9), Chrome, PowerShell 7, WinXShell GUI included
 - ✅ ~400-500MB final ISO (optimized)
-- ✅ No Scoop dependencies
+- ✅ No Scoop dependencies — portable/zip downloads only
+- ✅ Driver injection support (`Drivers\` folder + `-DriversPath` parameter)
+- ✅ Custom wallpaper support (`-WallpaperPath` parameter)
 - ✅ Professional documentation
 - ✅ Ready to deploy immediately
 
@@ -41,6 +43,7 @@ Then select option "1" for Full Build
 | **Optimize-WinRE.ps1** | Size optimization | Optional 📦 |
 | **Quick-Launch.ps1** | Interactive launcher | Easy starter 🎯 |
 | **Verify-Environment.ps1** | Pre-flight check | Run first ✓ |
+| **Drivers\** | Extra drivers to inject | Drop `.inf` files here 💾 |
 
 ---
 
@@ -87,30 +90,28 @@ C:\OSDCloud\LiveWinRE\
 | Component | Size | Provides |
 |-----------|------|----------|
 | Windows PE | Base | Boot environment, drivers |
-| OpenJDK 11 JRE | 150MB | Java application support |
-| Chrome | 100MB | Web browser |
-| PowerShell 7 | 40MB | Scripting & automation |
-| WinXShell | 10MB | Lightweight GUI shell |
+| IBM Semeru JRE 8 (OpenJ9) | ~150MB | Java application support |
+| Chrome (portable) | ~100MB | Web browser |
+| PowerShell 7 | ~40MB | Scripting & automation |
+| WinXShell | ~10MB | Lightweight GUI desktop |
 | OSD Tools | Pre-loaded | System deployment wizard |
-| 7-Zip | 5MB | Archive handling |
+| 7-Zip | ~5MB | Archive handling |
 
 ---
 
 ## What Improvements You're Getting
 
-### ❌ Old Way (Total-Modv2.ps1)
-```
-Scoop → Multiple buckets → Portable apps → Fragile, bloated
-```
-
-### ✅ New Way (Build-OSDCloud-Clean.ps1)
-```
-Direct Downloads → Native Integration → Clean, optimized
-- No package manager
-- Reliable downloads
-- Smaller footprint
-- Better performance
-```
+| Aspect | Old (Scoop-based) | New (Clean) |
+|--------|-----------------|-------------|
+| **Package Manager** | Scoop + 4 buckets | Direct downloads |
+| **Reliability** | App discovery issues | Official URLs |
+| **Shell** | Cairo (20MB) | WinXShell (10MB) |
+| **Java** | OpenJDK 11 HotSpot | IBM Semeru JRE 8 OpenJ9 |
+| **Drivers** | Manual | Auto-inject from `Drivers\` |
+| **Wallpaper** | Fixed | Customizable via parameter |
+| **Size** | 600-800MB | 400-500MB |
+| **Optimization** | Manual | Automated |
+| **Documentation** | Minimal | Comprehensive |
 
 ---
 
@@ -134,6 +135,16 @@ Direct Downloads → Native Integration → Clean, optimized
 ### Check System Before Building
 ```powershell
 .\Verify-Environment.ps1
+```
+
+### Inject Custom Drivers
+
+Drop `.inf` drivers (with `.sys`/`.cat`) into `Drivers\` sub-folders, then build.
+
+### Use Custom Wallpaper
+
+```powershell
+.\Build-OSDCloud-Clean.ps1 -Mode Full -WallpaperPath "C:\Images\corp-wallpaper.jpg"
 ```
 
 ---
@@ -160,19 +171,11 @@ Direct Downloads → Native Integration → Clean, optimized
 
 ## Pro Tips
 
-### Speed Up Rebuild
-If you change just scripts/registry, use:
-```powershell
-.\Build-OSDCloud-Clean.ps1 -Mode BuildWinRE
-.\Build-OSDCloud-Clean.ps1 -Mode BuildISO
-```
-This skips downloading again (~30 min instead of 60min)
-
-### Optimize for Production
-```powershell
-.\Optimize-WinRE.ps1 -Operation OptimizeAll
-```
-Reduces ISO from ~600MB to ~450MB (25% smaller)
+- 💾 Run on an SSD — WIM operations are much faster
+- 🔌 Ensure stable internet for first build (~1-2GB downloads)
+- ♻️ Subsequent builds reuse workspace (20-30 min, no re-download)
+- 📦 Run `.\Optimize-WinRE.ps1 -Operation OptimizeAll` after build for smaller ISO
+- 🧑‍💻 All scripts are heavily commented — safe to read and customize
 
 ---
 
@@ -204,35 +207,40 @@ See **README.md** for complete troubleshooting section.
 
 ```
 Entry Points:
-├── START HERE (this file)
-├── QUICKSTART.md          ← 5-minute quick start
-└── README.md              ← Complete reference
+├── START HERE (this file)           ← You are here
+├── QUICKSTART.md                    ← 5-minute quick start
+└── README.md                        ← Complete reference
 
-Guides:
-├── QUICKSTART.md          ← Get started fast
-└── PROJECT-SUMMARY.md     ← What was built & why
+Reference:
+├── PROJECT-SUMMARY.md               ← Architecture & technical details
+├── CHANGES.md                       ← What was refactored
+└── REFACTORING-SUMMARY.md           ← Detailed change list
 
 Scripts:
-├── Quick-Launch.ps1       ← Interactive menu
-├── Build-OSDCloud-Clean.ps1   ← Main builder
-├── Optimize-WinRE.ps1     ← Size optimization
-└── Verify-Environment.ps1 ← Pre-flight check
+├── Quick-Launch.ps1                 ← Interactive menu
+├── Build-OSDCloud-Clean.ps1         ← Main builder
+├── Optimize-WinRE.ps1               ← Size optimization
+└── Verify-Environment.ps1           ← Pre-flight check
+
+Driver Injection:
+└── Drivers\                         ← Drop .inf drivers here
+    └── README.md                    ← Driver folder instructions
 ```
 
 ---
 
 ## Key Differences from Old Solution
 
-| Aspect | Old (Total-Modv2.ps1) | New (Clean) |
+| Aspect | Old (Scoop-based) | New (Clean) |
 |--------|----------------------|------------|
 | **Package Manager** | Scoop + 4 buckets | Direct downloads |
-| **Reliability** | App discovery issues | Direct URLs |
+| **Reliability** | App discovery issues | Official URLs |
+| **Shell** | Cairo (20MB) | WinXShell (10MB) |
+| **Java** | OpenJDK 11 HotSpot | IBM Semeru JRE 8 OpenJ9 |
+| **Drivers** | Manual | Auto-inject from `Drivers\` |
 | **Size** | 600-800MB | 400-500MB |
-| **Integration** | Portable (fragile) | Native (integrated) |
-| **Network Boot** | None | PXE + iPXE |
 | **Optimization** | Manual | Automated |
-| **Documentation** | Minimal | 10,000+ words |
-| **Customization** | Difficult | Easy |
+| **Documentation** | Minimal | Comprehensive |
 
 ---
 
@@ -271,19 +279,8 @@ Scripts:
 | Full build (1st time) | 45-60 min | Downloads ~1-2GB |
 | Full build (subsequent) | 20-30 min | Skips downloads |
 | Optimization | 10-15 min | Optional, 20-30% size reduction |
-| Network boot setup | 5-10 min | Optional |
 | **Total initial setup** | **60-75 min** | ☕ Get coffee! |
 | **Future rebuilds** | **30 min** | Much faster |
-
----
-
-## One More Thing
-
-**The old scripts are still there:**
-- Total-Modv2.ps1 (original)
-- Build-OSDCloud-LiveWinRE.ps1 (original)
-
-You can keep them as reference. The new system is completely independent.
 
 ---
 
@@ -304,8 +301,8 @@ Read **README.md** (after first build)
 
 ---
 
-**Version**:2.0.0
+**Version**: 2.0.0  
 **Status**: ✅ Production Ready  
-**Last Updated**: June 2025
+**Last Updated**: February 2026
 
 Happy deploying! 🚀
