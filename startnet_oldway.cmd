@@ -2,7 +2,7 @@
 wpeinit
 cd\
 title OSD 26.2.3.2
-PowerShell -Nol -C Initialize-OSDCloudStartnet
+PowerShell -Nol -C Initialize-OSDCloudStartnet -WirelessConnect
 PowerShell -Nol -C Initialize-OSDCloudStartnetUpdate
 @ECHO OFF
 ECHO Start-OSDCloud
