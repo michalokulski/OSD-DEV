@@ -55,8 +55,10 @@ $config = @{
     PowerShellUrl   = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.zip"
 
     # WinXShell: purpose-built WinPE shell (Lua-scripted, no .NET required)
-    # Source: wimbuilder2 vendor directory
-    WinXShellBase   = "https://raw.githubusercontent.com/slorelee/wimbuilder2/master/vendor/WinXShell/X_PF/WinXShell"
+    # Source: wimbuilder2 vendor directory — PINNED to commit fc0c932 (2026-01-02)
+    # To upgrade: check https://github.com/slorelee/wimbuilder2/commits/master/vendor/WinXShell
+    # then update both the SHA below and the comment above.
+    WinXShellBase   = "https://raw.githubusercontent.com/slorelee/wimbuilder2/fc0c93297429800086736c145936a66b657dfdf2/vendor/WinXShell/X_PF/WinXShell"
 
     Version         = "2.0.0"
     BuildDate       = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -432,6 +434,25 @@ function Invoke-WinRECustomization {
     New-Item "$Mount\Tools\bin" -ItemType Directory -Force | Out-Null
     New-Item "$Mount\Tools\scripts" -ItemType Directory -Force | Out-Null
 
+    # ── Patch WinXShell.lua — pin wallpaper path (PhoenixPE approach) ──
+    # The upstream WinXShell.lua uses a relative/undefined wallpaper path.
+    # Set it explicitly so it resolves correctly regardless of CWD at WinXShell launch.
+    $wxsLua = "$Mount\Tools\winxshell\WinXShell.lua"
+    if (Test-Path $wxsLua) {
+        $wxsContent = Get-Content $wxsLua -Raw -Encoding UTF8
+        if ($wxsContent -match 'wallpaper\s*=\s*"[^"]*"') {
+            $wxsContent = $wxsContent -replace 'wallpaper\s*=\s*"[^"]*"', 'wallpaper = "X:\\Tools\\winxshell\\wallpaper.jpg"'
+            Set-Content $wxsLua $wxsContent -Encoding UTF8 -NoNewline
+            Write-Status "WinXShell.lua: wallpaper path pinned to X:\Tools\winxshell\wallpaper.jpg" -Type Success
+        }
+        else {
+            Write-Status "WinXShell.lua: wallpaper key not found — skipping patch (verify manually)" -Type Warning
+        }
+    }
+    else {
+        Write-Status "WinXShell.lua not found at $wxsLua — wallpaper patch skipped" -Type Warning
+    }
+
     # ── Configure Registry ──
     Write-Status "Configuring offline registry..." -Type Info
 
@@ -615,33 +636,43 @@ cmd /k
     # Copy launchers to bin (so they're on PATH)
     Copy-Item "$scriptsDir\*.cmd" "$Mount\Tools\bin\" -Force
 
-    # Create desktop shortcuts
-    $desktopDir = "$Mount\Users\Default\Desktop"
-    New-Item $desktopDir -ItemType Directory -Force | Out-Null
+    # Create desktop shortcut bootstrap script (run at WinPE first-boot via startnet.cmd)
+    # Rationale: shortcuts point to X:\ paths that don't exist on the build host.
+    # Creating them at WinPE boot-time (when X:\ is live) is the PhoenixPE approach
+    # and avoids unreliable build-time COM calls against non-existent paths.
+    $createShortcutsScript = @'
+param()
+# Creates desktop shortcuts at WinPE boot — X:\ is live at this point
+$desktopDir = "X:\Users\Public\Desktop"
+New-Item $desktopDir -ItemType Directory -Force | Out-Null
 
-    $shortcuts = @(
-        @{ Name = "OSD Deploy";     Target = "X:\Tools\scripts\OSD-Deploy.cmd" }
-        @{ Name = "Chrome Browser"; Target = "X:\Tools\scripts\Chrome.cmd" }
-        @{ Name = "PowerShell 7";   Target = "X:\Tools\pwsh\pwsh.exe" }
-        @{ Name = "Command Prompt"; Target = "X:\Tools\scripts\CommandPrompt.cmd" }
-    )
+$shortcuts = @(
+    @{ Name = "OSD Deploy";     Target = "X:\Tools\scripts\OSD-Deploy.cmd";     WorkDir = "X:\Tools" }
+    @{ Name = "Chrome Browser"; Target = "X:\Tools\scripts\Chrome.cmd";         WorkDir = "X:\Tools\chrome" }
+    @{ Name = "PowerShell 7";   Target = "X:\Tools\pwsh\pwsh.exe";              WorkDir = "X:\Tools\pwsh" }
+    @{ Name = "Command Prompt"; Target = "X:\Tools\scripts\CommandPrompt.cmd";  WorkDir = "X:\Tools" }
+)
 
-    foreach ($sc in $shortcuts) {
-        try {
-            $wsh = New-Object -ComObject WScript.Shell
-            $lnk = $wsh.CreateShortcut("$desktopDir\$($sc.Name).lnk")
-            $lnk.TargetPath = $sc.Target
-            $lnk.WorkingDirectory = "X:\Tools"
-            $lnk.Save()
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
-        }
-        catch {
-            # Fallback: create a .cmd on the desktop
-            Write-Status "COM shortcut failed for $($sc.Name), using .cmd fallback" -Type Warning
-            Set-Content -Path "$desktopDir\$($sc.Name).cmd" `
-                        -Value "@echo off`nstart `"`" `"$($sc.Target)`"" -Encoding ASCII
-        }
+foreach ($sc in $shortcuts) {
+    try {
+        $wsh = New-Object -ComObject WScript.Shell
+        $lnk = $wsh.CreateShortcut("$desktopDir\$($sc.Name).lnk")
+        $lnk.TargetPath       = $sc.Target
+        $lnk.WorkingDirectory = $sc.WorkDir
+        $lnk.Save()
+        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
     }
+    catch {
+        # Fallback: plain cmd stub on the desktop
+        "@echo off`nstart `"`" `"$($sc.Target)`"" | Set-Content "$desktopDir\$($sc.Name).cmd" -Encoding ASCII
+    }
+}
+'@
+    Set-Content -Path "$scriptsDir\CreateShortcuts.ps1" -Value $createShortcutsScript -Encoding UTF8
+    Write-Status "Desktop shortcut bootstrap script created (runs at WinPE boot)" -Type Info
+
+    # Copy launchers to bin (so they're on PATH)
+    Copy-Item "$scriptsDir\*.cmd" "$Mount\Tools\bin\" -Force
 
     Write-Status "Launcher setup complete" -Type Success
 }
@@ -709,13 +740,23 @@ rem Environment: make all portable tools available from any shell
 set PATH=X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\chrome;X:\Tools\winxshell;X:\Tools\7zip;%PATH%
 set JAVA_HOME=X:\Tools\java
 
+rem Create desktop shortcuts now that X:\ is live (build-time host cannot resolve X:\ paths)
+X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NonInteractive -File X:\Tools\scripts\CreateShortcuts.ps1
+
 rem Show mode selector (OSD Deploy vs WinXShell Desktop)
 call X:\Tools\scripts\ModeSelector.cmd
 
 rem WinXShell starts automatically as the desktop shell via Winlogon\Shell registry key.
 "@
 
-    $finalStartnet = $osdStartnet + $customBlock
+    # Idempotency guard: do not re-append our custom block on repeated runs
+    if ($osdStartnet -match [regex]::Escape('ModeSelector.cmd')) {
+        Write-Status "Custom launcher block already present in startnet.cmd — skipping append" -Type Warning
+        $finalStartnet = $osdStartnet
+    }
+    else {
+        $finalStartnet = $osdStartnet + $customBlock
+    }
     Set-Content -Path $startnetPath -Value $finalStartnet -Encoding ASCII
 
     Write-Status "startnet.cmd updated (OSD WiFi block preserved, LiveWinRE launcher appended)" -Type Success
@@ -768,6 +809,17 @@ function Invoke-WinRECommit {
     # Report image size before commit
     $toolsSize = Get-DirectorySize "$Mount\Tools"
     Write-Status "Tools payload size: $(Format-FileSize $toolsSize)" -Type Info
+
+    # Force GC to release any lingering COM / file handles before dismounting.
+    # Without this, WScript.Shell COM objects or open file handles can leave the
+    # registry hives locked and cause 'the process cannot access the file' errors.
+    [gc]::Collect()
+    [gc]::WaitForPendingFinalizers()
+
+    # Safety: ensure registry hives are unloaded before dismount.
+    # These are no-ops if Invoke-WinRECustomization already unloaded them correctly.
+    reg unload "HKLM\WinRE_SW"  2>$null
+    reg unload "HKLM\WinRE_SYS" 2>$null
 
     Dismount-WindowsImage -Path $Mount -Save
     Write-Status "WinRE image committed" -Type Success
