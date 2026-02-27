@@ -70,9 +70,9 @@ function Invoke-CleanupTemp {
     
     Write-Status "Mounting WIM for cleanup..." -Type Info
     New-Item $Mount -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-    
     Mount-WindowsImage -ImagePath $bootWim -Index 1 -Path $Mount
-    
+
+    try {
     # Define cleanup paths
     $cleanupPaths = @(
         "$Mount\Windows\Temp",
@@ -81,29 +81,31 @@ function Invoke-CleanupTemp {
         "$Mount\Windows\System32\spool\drivers",  # Print drivers not needed
         "$Mount\Windows\System32\DriverStore\FileRepository"  # Extra drivers
     )
-    
+
     $totalFreed = 0
-    
+
     foreach ($path in $cleanupPaths) {
         if (Test-Path $path) {
             $beforeSize = Get-DirectorySize $path
-            
+
             # Delete all files but keep directory structure
-            Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | 
+            Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue |
                 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-            
+
             $afterSize = Get-DirectorySize $path
             $freed = $beforeSize - $afterSize
             $totalFreed += $freed
-            
+
             Write-Status "Cleaned: $(Split-Path $path -Leaf) - Freed: $(Format-FileSize $freed)"
         }
     }
-    
-    Write-Status "Dismounting WIM..." -Type Info
-    Dismount-WindowsImage -Path $Mount -Save
-    
+
     Write-Status "Cleanup complete! Freed: $(Format-FileSize $totalFreed)" -Type Success
+    }
+    finally {
+        Write-Status "Dismounting WIM..." -Type Info
+        Dismount-WindowsImage -Path $Mount -Save -ErrorAction SilentlyContinue
+    }
 }
 
 # ====================================
@@ -158,9 +160,9 @@ function Invoke-RemoveBlob {
     
     Write-Status "Mounting WIM..." -Type Info
     New-Item $Mount -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-    
     Mount-WindowsImage -ImagePath $bootWim -Index 1 -Path $Mount
-    
+
+    try {
     # Remove components
     $removeComponents = @(
         "$Mount\Windows\System32\spool",           # Print queue
@@ -170,21 +172,23 @@ function Invoke-RemoveBlob {
         "$Mount\Users\Default\AppData\Local\Temp", # User temp
         "$Mount\Windows\System32\dllcache"         # DLL cache
     )
-    
+
     foreach ($component in $removeComponents) {
         if (Test-Path $component) {
             $beforeSize = Get-DirectorySize $component
-            
+
             Remove-Item $component -Force -Recurse -ErrorAction SilentlyContinue
-            
+
             Write-Status "Removed: $(Split-Path $component -Leaf) - Freed: $(Format-FileSize $beforeSize)"
         }
     }
-    
-    Write-Status "Dismounting WIM..." -Type Info
-    Dismount-WindowsImage -Path $Mount -Save
-    
+
     Write-Status "Component removal complete" -Type Success
+    }
+    finally {
+        Write-Status "Dismounting WIM..." -Type Info
+        Dismount-WindowsImage -Path $Mount -Save -ErrorAction SilentlyContinue
+    }
 }
 
 # ====================================
@@ -202,17 +206,17 @@ function Invoke-AnalyzeWIM {
     
     Write-Status "Mounting WIM for analysis..." -Type Info
     New-Item $Mount -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-    
     Mount-WindowsImage -ImagePath $bootWim -Index 1 -Path $Mount
-    
-    # Define analysis sections
+
+    try {
+    # Define analysis sections — each value is a comma-separated list of paths
     $sections = @{
         'System32'            = "$Mount\Windows\System32"
         'Drivers'             = "$Mount\Windows\System32\drivers"
         'Tools'               = "$Mount\Tools"
-        'Temporary Files'     = "$Mount\Windows\Temp,C:\Mount\Payload"
-        'WinSXS'             = "$Mount\Windows\WinSXS"
-        'Boot Media'          = "$Workspace\Media\*"
+        'Temporary Files'     = "$Mount\Windows\Temp,$Mount\Windows\Logs"
+        'WinSXS'              = "$Mount\Windows\WinSXS"
+        'Boot Media'          = "$Workspace\Media"
     }
     
     $totalSize = 0
@@ -220,7 +224,7 @@ function Invoke-AnalyzeWIM {
     
     foreach ($section in $sections.GetEnumerator()) {
         $size = 0
-        $paths = $section.Value -split ','
+        $paths = $section.Value -split ',' | ForEach-Object { $_.Trim() }
         
         foreach ($path in $paths) {
             if (Test-Path $path) {
@@ -253,9 +257,12 @@ function Invoke-AnalyzeWIM {
     
     Write-Host "`n"
     Write-Status "Total Size: $(Format-FileSize $totalSize)" -Type Success
-    
-    Write-Status "Dismounting WIM..." -Type Info
-    Dismount-WindowsImage -Path $Mount -Discard
+
+    }
+    finally {
+        Write-Status "Dismounting WIM..." -Type Info
+        Dismount-WindowsImage -Path $Mount -Discard -ErrorAction SilentlyContinue
+    }
 }
 
 # ====================================
@@ -290,7 +297,7 @@ Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 
 ## WIM Statistics
 
-ISO File: $(if (Test-Path "$Workspace\*.iso") { Get-ChildItem "$Workspace\*.iso" | Select -First 1 | % { "$(Split-Path $_ -Leaf) - $(Format-FileSize (Get-Item $_).Length)" } } else { "Not found" })
+ISO File: $(if (Test-Path "$Workspace\*.iso") { Get-ChildItem "$Workspace\*.iso" | Select-Object -First 1 | ForEach-Object { "$(Split-Path $_ -Leaf) - $(Format-FileSize (Get-Item $_).Length)" } } else { 'Not found' })
 
 boot.wim: $(if (Test-Path "$Workspace\Media\sources\boot.wim") { Format-FileSize (Get-Item "$Workspace\Media\sources\boot.wim").Length } else { "Not found" })
 

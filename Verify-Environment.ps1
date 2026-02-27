@@ -49,7 +49,8 @@ $psVersion = $PSVersionTable.PSVersion
 Write-Host "  OK  PowerShell: v$psVersion" -ForegroundColor Green
 
 # Disk Space
-$driveLetter = $PSScriptRoot.Substring(0, 1)
+$scriptDir = if ([string]::IsNullOrEmpty($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+$driveLetter = if ($scriptDir.Length -ge 2 -and $scriptDir[1] -eq ':') { $scriptDir[0] } else { (Get-Location).Drive.Name }
 $drive = Get-PSDrive $driveLetter -ErrorAction SilentlyContinue
 if ($drive) {
     $freeGB = $drive.Free / 1GB
@@ -81,7 +82,7 @@ $scripts = @{
 }
 
 foreach ($scriptName in $scripts.Keys) {
-    $scriptPath = Join-Path $PSScriptRoot $scriptName
+    $scriptPath = Join-Path $scriptDir $scriptName
     if (Test-Path $scriptPath) {
         $size = (Get-Item $scriptPath).Length / 1KB
         Write-Host "  OK  $scriptName ($([math]::Round($size, 1)) KB)" -ForegroundColor Green
@@ -103,7 +104,7 @@ Write-Host "[3/8] Documentation" -ForegroundColor Cyan
 $docs = @('README.md', 'QUICKSTART.md', 'PROJECT-SUMMARY.md', 'START-HERE.md')
 $missingDocs = @()
 foreach ($docName in $docs) {
-    $docPath = Join-Path $PSScriptRoot $docName
+    $docPath = Join-Path $scriptDir $docName
     if (Test-Path $docPath) {
         Write-Host "  OK  $docName" -ForegroundColor Green
     }
@@ -163,7 +164,6 @@ Write-Host ""
 # ====================================
 Write-Host "[5/8] Stale Mount Check" -ForegroundColor Cyan
 
-$mountPath = "C:\Mount"
 $staleMounts = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue
 if ($staleMounts) {
     foreach ($sm in $staleMounts) {
@@ -226,7 +226,7 @@ Write-Host ""
 Write-Host "[7/8] WinPE Compatibility Check" -ForegroundColor Cyan
 
 # Verify build script doesn't use MSI (sanity check)
-$buildScript = Join-Path $PSScriptRoot "Build-OSDCloud-Clean.ps1"
+$buildScript = Join-Path $scriptDir "Build-OSDCloud-Clean.ps1"
 if (Test-Path $buildScript) {
     $content = Get-Content $buildScript -Raw
     if ($content -match '\.msi') {
@@ -303,14 +303,21 @@ Write-Host ""
 # ====================================
 # EXECUTION PERMISSIONS
 # ====================================
-$policy = Get-ExecutionPolicy
+Write-Host "[Exec Policy]" -ForegroundColor Cyan
+$policy = Get-ExecutionPolicy -Scope Process
+if ($policy -eq 'Undefined') { $policy = Get-ExecutionPolicy }
 if ($policy -in 'Bypass', 'Unrestricted', 'RemoteSigned') {
     Write-Host "  OK  Execution Policy: $policy" -ForegroundColor Green
 }
+elseif ($policy -eq 'AllSigned') {
+    Write-Host "  WARN Execution Policy: $policy (scripts must be signed)" -ForegroundColor Yellow
+    $warnings += "Execution policy AllSigned — unsigned scripts will be blocked"
+}
 else {
-    Write-Host "  WARN Execution Policy: $policy (May need RemoteSigned)" -ForegroundColor Yellow
-    Write-Host "       Run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor Gray
-    $warnings += "Execution policy may block scripts"
+    Write-Host "  ERR Execution Policy: $policy — will block script execution" -ForegroundColor Red
+    Write-Host "       Fix: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor Gray
+    $errors += "Execution policy '$policy' will block scripts"
+    $allGood = $false
 }
 
 Write-Host ""

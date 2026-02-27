@@ -47,35 +47,35 @@ function Invoke-Menu {
         switch ($choice) {
             '1' {
                 Write-Status "Starting Full Build..." -Type Success
-                & ".\Build-OSDCloud-Clean.ps1" -Mode Full -Workspace $Workspace
+                & "$PSScriptRoot\Build-OSDCloud-Clean.ps1" -Mode Full -Workspace $Workspace
                 Write-Status "Build complete! Check $Workspace for ISO." -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
             '2' {
                 Write-Status "Building WinRE customization..." -Type Success
-                & ".\Build-OSDCloud-Clean.ps1" -Mode BuildWinRE -Workspace $Workspace
+                & "$PSScriptRoot\Build-OSDCloud-Clean.ps1" -Mode BuildWinRE -Workspace $Workspace
                 Write-Status "WinRE ready for customization!" -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
             '3' {
                 Write-Status "Building ISO from existing WinRE..." -Type Success
-                & ".\Build-OSDCloud-Clean.ps1" -Mode BuildISO -Workspace $Workspace
+                & "$PSScriptRoot\Build-OSDCloud-Clean.ps1" -Mode BuildISO -Workspace $Workspace
                 Write-Status "ISO creation complete!" -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
             '4' {
                 Write-Status "Starting WIM optimization (may take several minutes)..." -Type Warning
-                & ".\Optimize-WinRE.ps1" -Operation OptimizeAll -Workspace $Workspace
+                & "$PSScriptRoot\Optimize-WinRE.ps1" -Operation OptimizeAll -Workspace $Workspace
                 Write-Status "Optimization complete!" -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
             '5' {
                 Write-Status "Analyzing WIM content..." -Type Success
-                & ".\Optimize-WinRE.ps1" -Operation Analyze -Workspace $Workspace
+                & "$PSScriptRoot\Optimize-WinRE.ps1" -Operation Analyze -Workspace $Workspace
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
@@ -92,7 +92,7 @@ function Invoke-Menu {
             }
             '7' {
                 Write-Status "Opening README..." -Type Info
-                $readmeFile = ".\README.md"
+                $readmeFile = "$PSScriptRoot\README.md"
                 if (Test-Path $readmeFile) {
                     notepad.exe $readmeFile
                 }
@@ -139,7 +139,7 @@ function Invoke-Menu {
             '9' {
                 Clear-Host
                 Write-Status "Running environment verification..." -Type Info
-                & ".\Verify-Environment.ps1"
+                & "$PSScriptRoot\Verify-Environment.ps1"
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
@@ -162,9 +162,9 @@ function Invoke-Menu {
 try {
     # Verify scripts exist
     $scripts = @(
-        ".\Build-OSDCloud-Clean.ps1",
-        ".\Optimize-WinRE.ps1",
-        ".\Verify-Environment.ps1"
+        "$PSScriptRoot\Build-OSDCloud-Clean.ps1",
+        "$PSScriptRoot\Optimize-WinRE.ps1",
+        "$PSScriptRoot\Verify-Environment.ps1"
     )
     
     $missingScripts = $scripts | Where-Object { -not (Test-Path $_) }

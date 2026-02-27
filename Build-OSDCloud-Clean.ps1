@@ -416,8 +416,7 @@ function Invoke-WinRECustomization {
     $bootWim = "$Workspace\Media\sources\boot.wim"
 
     if (-not (Test-Path $bootWim)) {
-        Write-Status "boot.wim not found at $bootWim" -Type Error
-        return $false
+        throw "boot.wim not found at $bootWim — run Invoke-OSDCloudSetup first (Mode BuildWinRE or Full)"
     }
 
     # Mount WIM
@@ -632,9 +631,6 @@ echo.
 cmd /k
 '@
     Set-Content -Path "$scriptsDir\CommandPrompt.cmd" -Value $cmdLauncher -Encoding ASCII
-
-    # Copy launchers to bin (so they're on PATH)
-    Copy-Item "$scriptsDir\*.cmd" "$Mount\Tools\bin\" -Force
 
     # Create desktop shortcut bootstrap script (run at WinPE first-boot via startnet.cmd)
     # Rationale: shortcuts point to X:\ paths that don't exist on the build host.
@@ -877,11 +873,22 @@ function Invoke-Main {
 
     # Step 3-5: Mount, customize, configure shell
     if ($Mode -in 'BuildWinRE', 'Full') {
-        Invoke-WinRECustomization
-        Invoke-LauncherSetup
-        Invoke-WinPEShellConfig
-        Invoke-DriverInjection   # inject extra drivers while WIM is still mounted
-        Invoke-WinRECommit
+        try {
+            Invoke-WinRECustomization
+            Invoke-LauncherSetup
+            Invoke-WinPEShellConfig
+            Invoke-DriverInjection   # inject extra drivers while WIM is still mounted
+            Invoke-WinRECommit
+        }
+        catch {
+            Write-Status "Build pipeline failed: $_" -Type Error
+            # Safety dismount — no-op if already dismounted
+            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+            reg unload "HKLM\WinRE_SW"  2>$null
+            reg unload "HKLM\WinRE_SYS" 2>$null
+            Dismount-WindowsImage -Path $Mount -Discard -ErrorAction SilentlyContinue
+            throw
+        }
     }
 
     # Step 6: Build ISO
