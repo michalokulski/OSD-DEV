@@ -202,7 +202,7 @@ Get-Item "C:\OSDCloud\LiveWinRE\*.iso"
 - ✅ **Expected Savings**: 20-30% file size reduction
 
 ### 📚 Documentation
-- ✅ **README.md**: 6000+ word comprehensive guide
+- ✅ **README.md**: Comprehensive reference guide
 - ✅ **QUICKSTART.md**: 5-minute quick start
 - ✅ **PROJECT-SUMMARY.md**: Technical overview
 - ✅ **Inline Comments**: In all scripts for customization
@@ -245,7 +245,6 @@ Every element is documented and configurable:
 | WinRE customization only | 5-10 min | Just mounting & editing |
 | Optimization | 10-15 min | Depends on WIM size |
 | ISO generation | 5-10 min | DISM operations |
-| Network boot setup | 2-5 min | File copying |
 
 ## File Size Expectations
 
@@ -296,9 +295,9 @@ Every element is documented and configurable:
 3. Update application prep to download alternative
 
 ### Add Applications
-1. Add to `$apps` hashtable in `Invoke-ApplicationPrep`
-2. Provide URL and extraction format (zip or MSI)
-3. Script handles rest automatically
+1. Add download logic to `Invoke-ApplicationPrep`
+2. Provide URL and extraction format (zip only — no MSI in WinPE)
+3. Add `PATH` entry in `Invoke-WinRECustomization` if needed
 
 ## Troubleshooting Reference
 
@@ -361,10 +360,10 @@ See **README.md** for complete troubleshooting section.
 
 ### Documentation
 All documentation is self-contained in markdown files:
-- QUICKSTART.md - Get started fast
-- README.md - Comprehensive guide
-- DEPLOYMENT-GUIDE.md - Network boot specifics
-- DHCP-Configuration.txt - DHCP reference
+- QUICKSTART.md — Get started fast
+- README.md — Comprehensive guide
+- PROJECT-SUMMARY.md — Technical details
+- CHANGES.md — What was refactored
 
 ### Extending
 All scripts are heavily commented for customization:

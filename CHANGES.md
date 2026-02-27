@@ -123,8 +123,6 @@ The OSDCloud solution has been **refactored** to:
 
 ## 📋 What Got Removed & Why
 
-## 📋 What Got Removed & Why
-
 | Feature | Reason |
 |---------|--------|
 | `BuildNetwork` mode | NetworkBoot not required; simplified workflow |
@@ -197,8 +195,8 @@ Read in this order:
 1. 🔴 **START-HERE.md** (2-3 min) - Start here!
 2. 🔵 **QUICKSTART.md** (5 min) - Quick guide
 3. 🟢 **README.md** (30 min) - Full reference
-4. 🟡 **PROJECT-STAmmARY.md** (15 min) - Tech details
-5. this file - **REFACTORING-SUMMARY.md** - What changed
+4. 🟡 **PROJECT-SUMMARY.md** (15 min) — Tech details
+5. This file — **CHANGES.md** — What changed
 
 ---
 
@@ -214,7 +212,7 @@ Read in this order:
 - No DHCP/PXE/iPXE setup needed
 - Faster builds
 
-###More Agnostic
+### More Agnostic
 - WinXShell works in any WinPE environment
 - No complex dependencies
 - Pure Windows PE compatibility
@@ -244,7 +242,7 @@ Check documentation in order:
 1. START-HERE.md
 2. QUICKSTART.md
 3. README.md
-4. Project-SUMMARY.md
+4. PROJECT-SUMMARY.md
 
 All scripts are heavily commented for customization.
 
