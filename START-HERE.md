@@ -242,7 +242,7 @@ Scripts:
 
 1. **Build completes** → ISO file appears in `C:\OSDCloud\LiveWinRE\`
 2. **ISO boots** → Windows PE loads with splash screen
-3. **Desktop appears** → Cairo desktop shell loads
+3. **Desktop appears** → WinXShell desktop shell loads
 4. **Apps work** → Chrome, PowerShell, Java all functional
 5. **Deploy option** → OSD deployment wizard launches properly
 6. **Network ready** → (Optional) DHCP boot works
@@ -304,8 +304,8 @@ Read **README.md** (after first build)
 
 ---
 
-**Version**: 1.0.0  
+**Version**:2.0.0
 **Status**: ✅ Production Ready  
-**Last Updated**: February 26, 2026
+**Last Updated**: June 2025
 
 Happy deploying! 🚀

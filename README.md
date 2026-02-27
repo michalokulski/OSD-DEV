@@ -1,7 +1,7 @@
 # OSDCloud Clean WinRE LiveBoot - Complete Guide
 
-**Version:** 1.0.0  
-**Date:** February 2026  
+**Version:** 2.0.0  
+**Date:** June 2025  
 **Status:** Production Ready
 
 ## Overview
@@ -164,13 +164,13 @@ When booted, users can access:
 **Mode Selector:**
 Boots into menu to choose:
 - **Deploy Mode** - Runs OSD deployment wizard
-- **Desktop Mode** - Returns to Cairo desktop with tools
+- **Desktop Mode** - Returns to WinXShell desktop with tools
 
 ## Advanced Customization
 
 ### Adding Custom Applications
 1. Add to `$apps` hashtable in Build-OSDCloud-Clean.ps1
-2. Use zip format for extraction, MSI for installers:
+2. Use zip/portable format only (no MSI — WinPE has no msiexec):
 ```powershell
 $apps = @{
     'myapp' = @{ url = 'https://...'; file = 'myapp.zip'; unzip = $true }

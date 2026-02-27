@@ -1,15 +1,15 @@
 # ====================================
 # OSDCloud Clean WinRE - Verification
-# Check that everything is ready
+# Pre-flight checks for build readiness
 # ====================================
 
 #Requires -RunAsAdministrator
 
 Clear-Host
 
-Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
-Write-Host "║   OSDCloud Clean WinRE - Environment Verification         ║" -ForegroundColor Magenta
-Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+Write-Host "=======================================================" -ForegroundColor Magenta
+Write-Host "  OSDCloud Clean WinRE - Environment Verification  v2.0" -ForegroundColor Magenta
+Write-Host "=======================================================" -ForegroundColor Magenta
 Write-Host ""
 
 $allGood = $true
@@ -19,15 +19,15 @@ $errors = @()
 # ====================================
 # SYSTEM CHECKS
 # ====================================
-Write-Host "📋 System Requirements" -ForegroundColor Cyan
+Write-Host "[1/8] System Requirements" -ForegroundColor Cyan
 
 # Windows Version
 $osVersion = [System.Environment]::OSVersion.Version
 if ($osVersion.Major -ge 10) {
-    Write-Host "  ✓ Windows Version: $osVersion (OK)" -ForegroundColor Green
+    Write-Host "  OK  Windows Version: $osVersion" -ForegroundColor Green
 }
 else {
-    Write-Host "  ✗ Windows Version: $osVersion (Requires Windows 10+)" -ForegroundColor Red
+    Write-Host "  ERR Windows Version: $osVersion (Requires Windows 10+)" -ForegroundColor Red
     $allGood = $false
     $errors += "Windows version too old"
 }
@@ -35,18 +35,18 @@ else {
 # Administrator Check
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
 if ($isAdmin) {
-    Write-Host "  ✓ Administrator: Yes (OK)" -ForegroundColor Green
+    Write-Host "  OK  Administrator: Yes" -ForegroundColor Green
 }
 else {
-    Write-Host "  ✗ Administrator: No (REQUIRED)" -ForegroundColor Red
-    Write-Host "    Please run PowerShell as Administrator" -ForegroundColor Yellow
+    Write-Host "  ERR Administrator: No (REQUIRED)" -ForegroundColor Red
+    Write-Host "       Please run PowerShell as Administrator" -ForegroundColor Yellow
     $allGood = $false
     $errors += "Not running as administrator"
 }
 
 # PowerShell Version
-$psVersion = $PSVersionTable.PSVersion.Major
-Write-Host "  ✓ PowerShell: v$psVersion (OK)" -ForegroundColor Green
+$psVersion = $PSVersionTable.PSVersion
+Write-Host "  OK  PowerShell: v$psVersion" -ForegroundColor Green
 
 # Disk Space
 $driveLetter = $PSScriptRoot.Substring(0, 1)
@@ -54,11 +54,16 @@ $drive = Get-PSDrive $driveLetter -ErrorAction SilentlyContinue
 if ($drive) {
     $freeGB = $drive.Free / 1GB
     if ($freeGB -gt 50) {
-        Write-Host "  ✓ Free Space: $([math]::Round($freeGB, 1)) GB (OK)" -ForegroundColor Green
+        Write-Host "  OK  Free Space: $([math]::Round($freeGB, 1)) GB" -ForegroundColor Green
+    }
+    elseif ($freeGB -gt 20) {
+        Write-Host "  WARN Free Space: $([math]::Round($freeGB, 1)) GB (Recommended 50GB+)" -ForegroundColor Yellow
+        $warnings += "Low disk space ($([math]::Round($freeGB, 1)) GB free)"
     }
     else {
-        Write-Host "  ⚠ Free Space: $([math]::Round($freeGB, 1)) GB (Recommended 50GB+)" -ForegroundColor Yellow
-        $warnings += "Low disk space"
+        Write-Host "  ERR Free Space: $([math]::Round($freeGB, 1)) GB (Need at least 20GB)" -ForegroundColor Red
+        $errors += "Insufficient disk space"
+        $allGood = $false
     }
 }
 
@@ -67,25 +72,24 @@ Write-Host ""
 # ====================================
 # REQUIRED SCRIPTS
 # ====================================
-Write-Host "📄 Required Scripts" -ForegroundColor Cyan
+Write-Host "[2/8] Required Scripts" -ForegroundColor Cyan
 
 $scripts = @{
-    'Build-OSDCloud-Clean.ps1'    = 'Main build orchestrator'
-    'Optimize-WinRE.ps1'          = 'WIM optimization'
-    'Quick-Launch.ps1'            = 'Interactive launcher'
+    'Build-OSDCloud-Clean.ps1' = 'Main build orchestrator'
+    'Optimize-WinRE.ps1'       = 'WIM optimization'
+    'Quick-Launch.ps1'         = 'Interactive launcher'
 }
 
-$missingScripts = @()
 foreach ($scriptName in $scripts.Keys) {
     $scriptPath = Join-Path $PSScriptRoot $scriptName
     if (Test-Path $scriptPath) {
         $size = (Get-Item $scriptPath).Length / 1KB
-        Write-Host "  ✓ $scriptName ($([math]::Round($size, 1)) KB)" -ForegroundColor Green
+        Write-Host "  OK  $scriptName ($([math]::Round($size, 1)) KB)" -ForegroundColor Green
     }
     else {
-        Write-Host "  ✗ $scriptName (NOT FOUND)" -ForegroundColor Red
-        $missingScripts += $scriptName
+        Write-Host "  ERR $scriptName (NOT FOUND)" -ForegroundColor Red
         $allGood = $false
+        $errors += "Missing script: $scriptName"
     }
 }
 
@@ -94,112 +98,219 @@ Write-Host ""
 # ====================================
 # DOCUMENTATION
 # ====================================
-Write-Host "📚 Documentation" -ForegroundColor Cyan
+Write-Host "[3/8] Documentation" -ForegroundColor Cyan
 
-$docs = @{
-    'README.md'        = 'Complete reference'
-    'QUICKSTART.md'    = 'Quick start guide'
-    'PROJECT-SUMMARY.md' = 'Project overview'
-}
-
+$docs = @('README.md', 'QUICKSTART.md', 'PROJECT-SUMMARY.md', 'START-HERE.md')
 $missingDocs = @()
-foreach ($docName in $docs.Keys) {
+foreach ($docName in $docs) {
     $docPath = Join-Path $PSScriptRoot $docName
     if (Test-Path $docPath) {
-        $size = (Get-Item $docPath).Length / 1KB
-        Write-Host "  ✓ $docName ($([math]::Round($size, 1)) KB)" -ForegroundColor Green
+        Write-Host "  OK  $docName" -ForegroundColor Green
     }
     else {
-        Write-Host "  ⚠ $docName (NOT FOUND)" -ForegroundColor Yellow
+        Write-Host "  WARN $docName (not found)" -ForegroundColor Yellow
         $missingDocs += $docName
     }
 }
+if ($missingDocs.Count -gt 0) {
+    $warnings += "Missing docs: $($missingDocs -join ', ')"
+}
 
 Write-Host ""
 
 # ====================================
-# POWERSHELL MODULES
+# POWERSHELL MODULES & DISM TOOLS
 # ====================================
-Write-Host "🔧 PowerShell Modules" -ForegroundColor Cyan
+Write-Host "[4/8] PowerShell Modules & DISM" -ForegroundColor Cyan
 
-# Check for OSD Module
+# OSD Module
 $osdModule = Get-Module OSD -ListAvailable -ErrorAction SilentlyContinue
 if ($osdModule) {
     $version = $osdModule.Version | Sort-Object -Descending | Select-Object -First 1
-    Write-Host "  ✓ OSD Module: v$version (Installed)" -ForegroundColor Green
+    Write-Host "  OK  OSD Module: v$version" -ForegroundColor Green
 }
 else {
-    Write-Host "  ⚠ OSD Module: Not installed" -ForegroundColor Yellow
-    Write-Host "    Will be installed automatically during build" -ForegroundColor Gray
+    Write-Host "  WARN OSD Module: Not installed (will be downloaded during build)" -ForegroundColor Yellow
     $warnings += "OSD module will be downloaded during build"
 }
 
-# Windows PE Tools
+# DISM
 $dismPath = Get-Command dism.exe -ErrorAction SilentlyContinue
 if ($dismPath) {
-    Write-Host "  ✓ DISM Tools: Present (OK)" -ForegroundColor Green
+    Write-Host "  OK  DISM Tools: Available" -ForegroundColor Green
 }
 else {
-    Write-Host "  ⚠ DISM Tools: Not in PATH" -ForegroundColor Yellow
-    $warnings += "DISM may need Windows ADK"
+    Write-Host "  ERR DISM Tools: Not found (Windows ADK may be needed)" -ForegroundColor Red
+    $errors += "DISM not available"
+    $allGood = $false
+}
+
+# Mount-WindowsImage cmdlet
+$mountCmd = Get-Command Mount-WindowsImage -ErrorAction SilentlyContinue
+if ($mountCmd) {
+    Write-Host "  OK  Mount-WindowsImage: Available" -ForegroundColor Green
+}
+else {
+    Write-Host "  ERR Mount-WindowsImage: Not found" -ForegroundColor Red
+    $errors += "Mount-WindowsImage cmdlet missing"
+    $allGood = $false
 }
 
 Write-Host ""
 
 # ====================================
-# NETWORK & INTERNET
+# STALE MOUNT CHECK
 # ====================================
-Write-Host "🌐 Network Connectivity" -ForegroundColor Cyan
+Write-Host "[5/8] Stale Mount Check" -ForegroundColor Cyan
 
+$mountPath = "C:\Mount"
+$staleMounts = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue
+if ($staleMounts) {
+    foreach ($sm in $staleMounts) {
+        Write-Host "  WARN Stale mount: $($sm.Path) -> $($sm.ImagePath)" -ForegroundColor Yellow
+        $warnings += "Stale WIM mount at $($sm.Path)"
+    }
+    Write-Host "       Fix: Dismount-WindowsImage -Path '<path>' -Discard" -ForegroundColor Gray
+}
+else {
+    Write-Host "  OK  No stale mounts detected" -ForegroundColor Green
+}
+
+Write-Host ""
+
+# ====================================
+# NETWORK & DOWNLOAD URL REACHABILITY
+# ====================================
+Write-Host "[6/8] Network & Download URLs" -ForegroundColor Cyan
+
+# Basic internet check
 try {
     $internet = Test-NetConnection 8.8.8.8 -InformationLevel Quiet -WarningAction SilentlyContinue
-    if ($internet -or (Test-NetConnection google.com -InformationLevel Quiet -WarningAction SilentlyContinue)) {
-        Write-Host "  ✓ Internet: Connected (OK)" -ForegroundColor Green
+    if ($internet) {
+        Write-Host "  OK  Internet: Connected" -ForegroundColor Green
     }
     else {
-        Write-Host "  ⚠ Internet: May not be connected" -ForegroundColor Yellow
-        $warnings += "Check internet connection"
+        Write-Host "  WARN Internet: May not be connected" -ForegroundColor Yellow
+        $warnings += "Internet connectivity issue"
     }
 }
 catch {
-    Write-Host "  ⚠ Internet: Check manually" -ForegroundColor Yellow
+    Write-Host "  WARN Internet: Could not verify" -ForegroundColor Yellow
+    $warnings += "Internet check failed"
+}
+
+# Test critical download URLs
+$urls = @{
+    'GitHub (Java/PS7)' = "https://github.com"
+    'Google (Chrome)'   = "https://dl.google.com"
+    '7-Zip.org'         = "https://www.7-zip.org"
+    'GitHub Raw (WinXShell)' = "https://raw.githubusercontent.com"
+}
+
+foreach ($entry in $urls.GetEnumerator()) {
+    try {
+        $response = Invoke-WebRequest -Uri $entry.Value -Method Head -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+        Write-Host "  OK  $($entry.Key): Reachable" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  WARN $($entry.Key): NOT reachable" -ForegroundColor Yellow
+        $warnings += "$($entry.Key) not reachable"
+    }
 }
 
 Write-Host ""
 
 # ====================================
-# CONFIGURATION
+# WINPE COMPATIBILITY VALIDATION
 # ====================================
-Write-Host "⚙️  Configuration Paths" -ForegroundColor Cyan
+Write-Host "[7/8] WinPE Compatibility Check" -ForegroundColor Cyan
+
+# Verify build script doesn't use MSI (sanity check)
+$buildScript = Join-Path $PSScriptRoot "Build-OSDCloud-Clean.ps1"
+if (Test-Path $buildScript) {
+    $content = Get-Content $buildScript -Raw
+    if ($content -match '\.msi') {
+        Write-Host "  ERR Build script still references .msi files!" -ForegroundColor Red
+        Write-Host "       WinPE has no msiexec.exe — only portable/zip downloads work" -ForegroundColor Yellow
+        $errors += "Build script uses .msi downloads (incompatible with WinPE)"
+        $allGood = $false
+    }
+    else {
+        Write-Host "  OK  No .msi references in build script (portable-only)" -ForegroundColor Green
+    }
+
+    # Check WinXShell download includes wxsUI components
+    if ($content -match 'UI_TrayPanel\.zip' -and $content -match 'UI_WIFI\.zip' -and $content -match 'UI_Volume\.zip') {
+        Write-Host "  OK  WinXShell wxsUI components configured" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  WARN WinXShell may be missing wxsUI panel components" -ForegroundColor Yellow
+        $warnings += "WinXShell wxsUI zips may not be downloaded"
+    }
+
+    # Check for WPF dependency (doesn't work in WinPE)
+    if ($content -match 'PresentationFramework') {
+        Write-Host "  ERR Build script uses WPF (PresentationFramework) — not available in WinPE" -ForegroundColor Red
+        $errors += "WPF dependency detected — will crash in WinPE"
+        $allGood = $false
+    }
+    else {
+        Write-Host "  OK  No WPF dependencies (WinPE-safe)" -ForegroundColor Green
+    }
+}
+else {
+    Write-Host "  ERR Build script not found for validation" -ForegroundColor Red
+}
+
+Write-Host ""
+
+# ====================================
+# CONFIGURATION PATHS
+# ====================================
+Write-Host "[8/8] Configuration Paths" -ForegroundColor Cyan
 
 $workspacePath = "C:\OSDCloud\LiveWinRE"
 if (Test-Path $workspacePath) {
-    Write-Host "  ℹ Workspace: $workspacePath (exists)" -ForegroundColor Cyan
+    Write-Host "  INFO Workspace: $workspacePath (exists)" -ForegroundColor Cyan
+
+    $wim = "$workspacePath\Media\sources\boot.wim"
+    if (Test-Path $wim) {
+        $wimSizeMB = (Get-Item $wim).Length / 1MB
+        Write-Host "  OK  boot.wim: $([math]::Round($wimSizeMB, 1)) MB" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  INFO boot.wim: Not yet created (will be created during build)" -ForegroundColor Gray
+    }
+
+    $iso = Get-ChildItem "$workspacePath\*.iso" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($iso) {
+        $isoSizeGB = $iso.Length / 1GB
+        Write-Host "  OK  ISO: $($iso.Name) ($([math]::Round($isoSizeGB, 2)) GB)" -ForegroundColor Green
+    }
 }
 else {
-    Write-Host "  ℹ Workspace: $workspacePath (will be created)" -ForegroundColor Cyan
+    Write-Host "  INFO Workspace: $workspacePath (will be created during build)" -ForegroundColor Gray
 }
 
 $tempPath = "C:\Mount"
-Write-Host "  ℹ Mount Point: $tempPath (will be created)" -ForegroundColor Cyan
+Write-Host "  INFO Mount Point: $tempPath" -ForegroundColor Gray
 
 $buildPath = "C:\BuildPayload"
-Write-Host "  ℹ Build Payload: $buildPath (will be created)" -ForegroundColor Cyan
+Write-Host "  INFO Build Payload: $buildPath" -ForegroundColor Gray
 
 Write-Host ""
 
 # ====================================
 # EXECUTION PERMISSIONS
 # ====================================
-Write-Host "🔐 Script Execution Policy" -ForegroundColor Cyan
-
 $policy = Get-ExecutionPolicy
 if ($policy -in 'Bypass', 'Unrestricted', 'RemoteSigned') {
-    Write-Host "  ✓ Current: $policy (OK)" -ForegroundColor Green
+    Write-Host "  OK  Execution Policy: $policy" -ForegroundColor Green
 }
 else {
-    Write-Host "  ⚠ Current: $policy (May need to set to RemoteSigned)" -ForegroundColor Yellow
-    Write-Host "    Run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor Gray
+    Write-Host "  WARN Execution Policy: $policy (May need RemoteSigned)" -ForegroundColor Yellow
+    Write-Host "       Run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor Gray
+    $warnings += "Execution policy may block scripts"
 }
 
 Write-Host ""
@@ -207,54 +318,44 @@ Write-Host ""
 # ====================================
 # SUMMARY
 # ====================================
-Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Magenta
+Write-Host "=======================================================" -ForegroundColor Magenta
 
 if ($errors.Count -eq 0 -and $warnings.Count -eq 0) {
-    Write-Host "✅ READY TO BUILD" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "All systems are go! You can now run:" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  .\Quick-Launch.ps1      (Interactive menu)" -ForegroundColor Cyan
-    Write-Host "  .\Build-OSDCloud-Clean.ps1 -Mode Full  (Direct build)" -ForegroundColor Cyan
+    Write-Host "" -ForegroundColor Green
+    Write-Host "  READY TO BUILD  -  All checks passed" -ForegroundColor Green
+    Write-Host "" -ForegroundColor Green
+    Write-Host "  Run:" -ForegroundColor Green
+    Write-Host "    .\Quick-Launch.ps1                         (Interactive menu)" -ForegroundColor Cyan
+    Write-Host "    .\Build-OSDCloud-Clean.ps1 -Mode Full      (Direct build)" -ForegroundColor Cyan
     Write-Host ""
 }
 elseif ($errors.Count -eq 0) {
-    Write-Host "⚠️  WARNINGS DETECTED" -ForegroundColor Yellow
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "  WARNINGS DETECTED  -  Build should work but review these:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Issues to review:" -ForegroundColor Yellow
-    $warnings | ForEach-Object { Write-Host "  • $_" -ForegroundColor Yellow }
+    $warnings | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
     Write-Host ""
-    Write-Host "You can proceed, but review warnings first:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  .\Quick-Launch.ps1" -ForegroundColor Cyan
+    Write-Host "  You can proceed:" -ForegroundColor Yellow
+    Write-Host "    .\Quick-Launch.ps1" -ForegroundColor Cyan
     Write-Host ""
 }
 else {
-    Write-Host "❌ CANNOT BUILD" -ForegroundColor Red
+    Write-Host "" -ForegroundColor Red
+    Write-Host "  CANNOT BUILD  -  Critical errors found:" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Critical errors found:" -ForegroundColor Red
-    $errors | ForEach-Object { Write-Host "  • $_" -ForegroundColor Red }
+    $errors | ForEach-Object { Write-Host "    [ERR] $_" -ForegroundColor Red }
+    if ($warnings.Count -gt 0) {
+        Write-Host ""
+        $warnings | ForEach-Object { Write-Host "    [WARN] $_" -ForegroundColor Yellow }
+    }
     Write-Host ""
-    Write-Host "Please fix these issues before building:" -ForegroundColor Red
-    Write-Host "  1. Run PowerShell As Administrator" -ForegroundColor Gray
-    Write-Host "  2. Ensure Windows 10 or later" -ForegroundColor Gray
-    Write-Host "  3. Verify required scripts exist" -ForegroundColor Gray
+    Write-Host "  Fix these issues first:" -ForegroundColor Red
+    Write-Host "    1. Run PowerShell as Administrator" -ForegroundColor Gray
+    Write-Host "    2. Ensure Windows 10 or later" -ForegroundColor Gray
+    Write-Host "    3. Verify all required scripts exist" -ForegroundColor Gray
+    Write-Host "    4. Ensure no .msi references in build script" -ForegroundColor Gray
     Write-Host ""
 }
 
-Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Magenta
+Write-Host "=======================================================" -ForegroundColor Magenta
 Write-Host ""
-
-# ====================================
-# QUICK REFERENCE
-# ====================================
-Write-Host "📖 Quick Reference" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Full Build:              .\Build-OSDCloud-Clean.ps1 -Mode Full" -ForegroundColor Cyan
-Write-Host "  Interactive Menu:        .\Quick-Launch.ps1" -ForegroundColor Cyan
-Write-Host "  Optimize Size:           .\Optimize-WinRE.ps1 -Operation OptimizeAll" -ForegroundColor Cyan
-Write-Host "  Quick Start Guide:       .\QUICKSTART.md" -ForegroundColor Cyan
-Write-Host "  Full Documentation:      .\README.md" -ForegroundColor Cyan
-Write-Host ""
-
-Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Magenta

@@ -19,7 +19,7 @@ function Write-Status {
 
 function Show-Menu {
     Write-Status "===============================================" -Type Header
-    Write-Status "   OSDCloud Clean WinRE LiveBoot - Quick Launcher" -Type Header
+    Write-Status "   OSDCloud Clean WinRE LiveBoot v2.0 - Launcher" -Type Header
     Write-Status "===============================================" -Type Header
     Write-Host ""
     Write-Host " 1) Full Build (download, customize, create ISO)"
@@ -32,6 +32,7 @@ function Show-Menu {
     Write-Host " 6) Open Workspace Folder"
     Write-Host " 7) View README Documentation"
     Write-Host " 8) Check Build Status"
+    Write-Host " 9) Verify Environment (pre-flight checks)"
     Write-Host ""
     Write-Host " 0) Exit"
     Write-Host ""
@@ -40,7 +41,7 @@ function Show-Menu {
 function Invoke-Menu {
     do {
         Show-Menu
-        Write-Host -NoNewline " Select option [0-9]: "
+        Write-Host -NoNewline " Select [0-9]: "
         $choice = Read-Host
         
         switch ($choice) {
@@ -135,6 +136,13 @@ function Invoke-Menu {
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
+            '9' {
+                Clear-Host
+                Write-Status "Running environment verification..." -Type Info
+                & ".\Verify-Environment.ps1"
+                Read-Host "Press Enter to continue"
+                Clear-Host
+            }
             '0' {
                 Write-Status "Exiting..." -Type Info
                 exit 0
@@ -155,7 +163,8 @@ try {
     # Verify scripts exist
     $scripts = @(
         ".\Build-OSDCloud-Clean.ps1",
-        ".\Optimize-WinRE.ps1"
+        ".\Optimize-WinRE.ps1",
+        ".\Verify-Environment.ps1"
     )
     
     $missingScripts = $scripts | Where-Object { -not (Test-Path $_) }

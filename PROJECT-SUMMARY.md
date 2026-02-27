@@ -239,7 +239,7 @@ Every element is documented and configurable:
 | Java JRE | 150 MB |
 | Chrome | 100 MB |
 | PowerShell 7 | 40 MB |
-| Cairo | 20 MB |
+| WinXShell | 10 MB |
 | 7-Zip | 5 MB |
 | OSD+dependencies | 500 MB |
 | **Total** | ~1-2 GB |
@@ -267,7 +267,7 @@ Every element is documented and configurable:
    ```
 3. Rebuild
 
-### Change Desktop Shell from Cairo to Alternative
+### Desktop Shell: WinXShell (Lua-based, portable)
 1. Edit `Invoke-LauncherSetup` function
 2. Modify winpeshl.ini line to point to different shell
 3. Update application prep to download alternative
@@ -361,7 +361,7 @@ All scripts are heavily commented for customization:
 - Java 11 with environment variables
 - Chrome with shortcuts
 - PowerShell 7 in PATH
-- Cairo Desktop UI
+- WinXShell Desktop UI
 - File manager and explorer
 
 ✅ **Boot Experience**
@@ -426,6 +426,6 @@ You now have a **production-ready, clean OSD-based WinRE distribution** that:
 
 ---
 
-**Version**: 1.0.0  
-**Date**: February 26, 2026  
+**Version**: 2.0.0  
+**Date**: June 2025  
 **Status**: ✅ Production Ready

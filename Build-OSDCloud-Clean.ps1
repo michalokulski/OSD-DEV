@@ -1,17 +1,31 @@
 # ====================================
 # OSDCloud Clean WinRE LiveBoot Builder
-# GUI + Java + Chrome
-# No Scoop Dependencies
+# GUI + Java 8 (IBM Semeru) + Chrome + PowerShell 7
+# Portable-Only — No MSI / No Scoop
 # ====================================
+# Inspired by PhoenixPE (https://github.com/PhoenixPE/PhoenixPE)
+# Shell: WinXShell from wimbuilder2 (https://github.com/slorelee/wimbuilder2)
 
 param(
     [ValidateSet('BuildWinRE', 'BuildISO', 'Full')]
     [string]$Mode = 'Full',
-    
+
     [string]$Workspace = "C:\OSDCloud\LiveWinRE",
     [string]$Mount = "C:\Mount",
     [string]$BuildPayload = "C:\BuildPayload",
-    [string]$IsoName = "OSDCloud-LiveWinRE-Clean"
+    [string]$IsoName = "OSDCloud-LiveWinRE-Clean",
+
+    # Optional: path to a folder of .inf drivers to inject into the WinPE image.
+    # Place any .inf-based driver (with its .sys/.cat files) under this folder.
+    # Sub-folders are supported — all drivers are injected recursively.
+    # Leave empty to skip driver injection.
+    [string]$DriversPath = "$PSScriptRoot\Drivers",
+
+    # Optional: path to a custom wallpaper image (JPG/PNG/BMP) to use as the desktop
+    # background inside the WinPE/WinRE environment (WinXShell desktop).
+    # If not specified the default WinXShell wallpaper.jpg is used.
+    # Example: -WallpaperPath "C:\Images\corp-wallpaper.jpg"
+    [string]$WallpaperPath = ""
 )
 
 #Requires -RunAsAdministrator
@@ -20,65 +34,107 @@ param(
 # CONFIGURATION
 # ====================================
 $config = @{
-    JavaUrl         = "https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.21%2B9/OpenJDK11U-jre_x64_windows_hotspot_11.0.21_9.zip"
-    ChromeUrl       = "https://dl.google.com/chrome/install/googlechromestandaloneenterprise64.msi"
-    # WinXShell vendored directly from wimbuilder2 repo - no .NET required, purpose-built for WinPE
+    # --- Portable downloads only (NO .msi — WinPE has no msiexec) ---
+
+    # IBM Semeru Runtime Open Edition — Java 8 JRE portable zip (OpenJ9 JVM — lighter footprint than HotSpot)
+    # Releases: https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases
+    # TODO: bump JavaUrl + JavaSemeruVersion when a newer IBM Semeru 8 release ships
+    JavaSemeruVersion = "8.0.422.5"
+    JavaUrl         = "https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases/download/jdk8u422-b05/ibm-semeru-open-jre_x64_windows_8.0.422.5_openj9-0.46.0.zip"
+
+    # Chrome: download the uncompressed installer exe (self-extracting archive)
+    # PhoenixPE approach: extract Chrome-bin from the installer exe using 7-Zip
+    ChromeUrl       = "https://dl.google.com/release2/chrome/mnpsb6lkzuvjrtl77fwf3ttai4_143.0.7499.110/143.0.7499.110_chrome_installer_uncompressed.exe"
+
+    # 7-Zip: portable extra (standalone 7za.exe, NO msi)
+    SevenZipUrl     = "https://www.7-zip.org/a/7z2301-extra.7z"
+    # 7-Zip full portable ZIP (used to bootstrap extraction — standard zip, no 7z needed)
+    SevenZipBootUrl = "https://www.7-zip.org/a/7zr.exe"
+
+    # PowerShell 7 portable zip
+    PowerShellUrl   = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.zip"
+
+    # WinXShell: purpose-built WinPE shell (Lua-scripted, no .NET required)
+    # Source: wimbuilder2 vendor directory
     WinXShellBase   = "https://raw.githubusercontent.com/slorelee/wimbuilder2/master/vendor/WinXShell/X_PF/WinXShell"
-    PowerShellUrl   = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.1/PowerShell-7.4.1-win-x64.zip"
-    SevenZipUrl     = "https://www.7-zip.org/a/7z2301-x64.msi"
-    Version         = "1.0.0"
+
+    Version         = "2.0.0"
     BuildDate       = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    # Retry settings for downloads
+    MaxRetries      = 3
+    RetryDelaySec   = 5
 }
 
 # ====================================
-# FUNCTIONS
+# HELPER FUNCTIONS
 # ====================================
 function Write-Status {
     param([string]$Message, [ValidateSet('Info', 'Success', 'Warning', 'Error')]$Type = 'Info')
     $colors = @{ Info = 'Cyan'; Success = 'Green'; Warning = 'Yellow'; Error = 'Red' }
-    Write-Host "[$Type] $Message" -ForegroundColor $colors[$Type]
+    $prefix = @{ Info = '[INFO]'; Success = '[OK]'; Warning = '[WARN]'; Error = '[ERR]' }
+    Write-Host "$($prefix[$Type]) $Message" -ForegroundColor $colors[$Type]
 }
 
 function Invoke-Download {
-    param([string]$Url, [string]$OutFile, [string]$DisplayName)
-    try {
-        Write-Status "Downloading $DisplayName..." -Type Info
-        if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
-        
-        # Use TLS 1.2
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
-        
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
-        
-        if (Test-Path $OutFile) {
-            $size = (Get-Item $OutFile).Length / 1MB
-            Write-Status "Downloaded: $(Split-Path $OutFile -Leaf) ($([math]::Round($size, 2)) MB)" -Type Success
-            return $true
+    param(
+        [string]$Url,
+        [string]$OutFile,
+        [string]$DisplayName,
+        [int]$MaxRetries = $config.MaxRetries,
+        [int]$RetryDelaySec = $config.RetryDelaySec
+    )
+
+    # Ensure TLS 1.2+
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            Write-Status "Downloading $DisplayName (attempt $attempt/$MaxRetries)..." -Type Info
+            if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 300
+
+            if (Test-Path $OutFile) {
+                $size = (Get-Item $OutFile).Length / 1MB
+                if ($size -lt 0.001) {
+                    Write-Status "Downloaded file is empty: $DisplayName" -Type Warning
+                    continue
+                }
+                Write-Status "Downloaded: $(Split-Path $OutFile -Leaf) ($([math]::Round($size, 2)) MB)" -Type Success
+                return $true
+            }
         }
-        else {
-            Write-Status "Download failed: $DisplayName" -Type Error
-            return $false
+        catch {
+            Write-Status "Attempt $attempt failed for $DisplayName : $_" -Type Warning
+            if ($attempt -lt $MaxRetries) {
+                Write-Status "Retrying in $RetryDelaySec seconds..." -Type Info
+                Start-Sleep -Seconds $RetryDelaySec
+            }
         }
     }
-    catch {
-        Write-Status "Error downloading $DisplayName : $_" -Type Error
-        return $false
-    }
+
+    Write-Status "FAILED to download $DisplayName after $MaxRetries attempts" -Type Error
+    return $false
 }
 
-function New-LauncherScript {
-    param([string]$Path, [string]$Name, [string]$Target, [string]$Arguments = "")
-    
-    $content = @"
-# Launcher for $Name
-`$env:Path = "X:\Tools\bin;X:\Tools\jre\bin;X:\Tools\pwsh;" + `$env:Path
+function Get-DirectorySize {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return 0 }
+    try {
+        return (Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+    }
+    catch { return 0 }
+}
 
-& "$Target" $Arguments
-"@
-    
-    Set-Content -Path $Path -Value $content -Encoding UTF8
-    Write-Status "Created launcher: $Name"
+function Format-FileSize {
+    param([int64]$Size)
+    $units = 'B', 'KB', 'MB', 'GB', 'TB'
+    $i = 0; $s = [float]$Size
+    while ($s -ge 1024 -and $i -lt $units.Count - 1) { $s /= 1024; $i++ }
+    return "$([math]::Round($s, 2)) $($units[$i])"
 }
 
 # ====================================
@@ -86,18 +142,23 @@ function New-LauncherScript {
 # ====================================
 function Initialize-BuildEnvironment {
     Write-Status "=== Initializing Build Environment ===" -Type Info
-    
-    # Clean previous builds
+
+    # Dismount any stale WIM (prevents "access denied" during builds after crash)
     if (Test-Path $Mount) {
-        Write-Status "Dismounting previous WIM..." -Type Warning
-        Dismount-WindowsImage -Path $Mount -Discard -ErrorAction SilentlyContinue
+        $mounted = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $Mount }
+        if ($mounted) {
+            Write-Status "Dismounting stale WIM at $Mount..." -Type Warning
+            Dismount-WindowsImage -Path $Mount -Discard -ErrorAction SilentlyContinue
+        }
         Remove-Item $Mount -Recurse -Force -ErrorAction SilentlyContinue
     }
-    
+
+    # Create working directories
     @($Workspace, $Mount, $BuildPayload) | ForEach-Object {
         if (-not (Test-Path $_)) { New-Item $_ -ItemType Directory -Force | Out-Null }
     }
-    
+
     Write-Status "Build environment ready" -Type Success
 }
 
@@ -106,15 +167,15 @@ function Initialize-BuildEnvironment {
 # ====================================
 function Invoke-OSDCloudSetup {
     Write-Status "=== Setting up OSD Cloud Template ===" -Type Info
-    
+
     # Install OSD Module
     if (-not (Get-Module OSD -ListAvailable)) {
         Write-Status "Installing OSD PowerShell Module..." -Type Info
         Install-Module OSD -Force -Scope CurrentUser
     }
-    
+
     Import-Module OSD -Force
-    
+
     # Create WinRE Template
     if (-not (Test-Path "$Workspace\Media")) {
         Write-Status "Creating OSD WinRE template..." -Type Info
@@ -124,14 +185,19 @@ function Invoke-OSDCloudSetup {
     else {
         Write-Status "OSD template exists, using existing..." -Type Warning
     }
-    
+
     # Enhance WinPE
-    Write-Status "Enhancing WinPE with drivers and network..." -Type Info
+    # NOTE: -StartOSDCloudGUI is intentionally NOT passed here.
+    #   OSD would append 'Start-OSDCloudGUI' to startnet.cmd which we then strip.
+    #   We manage our own mode selector in Invoke-WinPEShellConfig.
+    # NOTE: -WirelessConnect is critical — OSD injects 'Initialize-OSDCloudStartnet -WirelessConnect'
+    #   into startnet.cmd. That function calls Start-WinREWiFi which pops the WiFi GUI.
+    #   Invoke-WinPEShellConfig PRESERVES this block and only appends after it.
+    Write-Status "Enhancing WinPE with cloud drivers + WiFi support..." -Type Info
     Edit-OSDCloudWinPE `
         -CloudDriver * `
-        -WirelessConnect `
-        -StartOSDCloudGUI
-    
+        -WirelessConnect
+
     Write-Status "OSD Cloud setup complete" -Type Success
 }
 
@@ -139,53 +205,128 @@ function Invoke-OSDCloudSetup {
 # STEP 2: DOWNLOAD & PREPARE APPLICATIONS
 # ====================================
 function Invoke-ApplicationPrep {
-    Write-Status "=== Preparing Applications ===" -Type Info
-    
-    # Create temp folder for downloads
+    Write-Status "=== Preparing Portable Applications ===" -Type Info
+
     $downloads = "$BuildPayload\downloads"
     if (Test-Path $downloads) { Remove-Item $downloads -Recurse -Force }
     New-Item $downloads -ItemType Directory -Force | Out-Null
-    
-    # Define apps to download
-    $apps = @{
-        'java'   = @{ url = $config.JavaUrl; file = 'openjdk-jre.zip'; unzip = $true }
-        'chrome' = @{ url = $config.ChromeUrl; file = 'chrome-install.msi'; unzip = $false }
-        'pwsh'   = @{ url = $config.PowerShellUrl; file = 'pwsh.zip'; unzip = $true }
-        '7zip'   = @{ url = $config.SevenZipUrl; file = '7zip-install.msi'; unzip = $false }
-    }
-    
+
     $tools = "$BuildPayload\tools"
     New-Item $tools -ItemType Directory -Force | Out-Null
-    
-    # Download each app
-    foreach ($app in $apps.GetEnumerator()) {
-        $appName = $app.Key
-        $appConfig = $app.Value
-        $downloadPath = Join-Path $downloads $appConfig.file
-        
-        if (Invoke-Download -Url $appConfig.url -OutFile $downloadPath -DisplayName $appName) {
-            if ($appConfig.unzip) {
-                Write-Status "Extracting $appName..." -Type Info
-                $appDir = Join-Path $tools $appName
-                New-Item $appDir -ItemType Directory -Force | Out-Null
-                
-                Expand-Archive -Path $downloadPath -DestinationPath $appDir -Force
-                Write-Status "Extracted $appName to $appDir" -Type Success
-            }
-            else {
-                Copy-Item $downloadPath "$tools\$(Split-Path $downloadPath -Leaf)" -Force
-                Write-Status "Copied $appName installer" -Type Success
-            }
+
+    # ── 1. IBM Semeru JRE 8 (portable zip — extract directly) ──
+    Write-Status "--- IBM Semeru JRE 8 (OpenJ9) ---" -Type Info
+    $javaZip = "$downloads\semeru-jre8.zip"
+    if (Invoke-Download -Url $config.JavaUrl -OutFile $javaZip -DisplayName "IBM Semeru JRE 8 ($($config.JavaSemeruVersion))") {
+        $javaDir = "$tools\java"
+        New-Item $javaDir -ItemType Directory -Force | Out-Null
+        Expand-Archive -Path $javaZip -DestinationPath $javaDir -Force
+        # Flatten: the zip contains a top-level folder e.g. jdk-1.8.0_422-jre
+        $inner = Get-ChildItem $javaDir -Directory | Select-Object -First 1
+        if ($inner) {
+            Get-ChildItem $inner.FullName | Move-Item -Destination $javaDir -Force
+            Remove-Item $inner.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Status "IBM Semeru JRE 8 extracted ($(Format-FileSize (Get-DirectorySize $javaDir)))" -Type Success
+    }
+
+    # ── 2. PowerShell 7 (already a zip — extract directly) ──
+    Write-Status "--- PowerShell 7 ---" -Type Info
+    $pwshZip = "$downloads\pwsh.zip"
+    if (Invoke-Download -Url $config.PowerShellUrl -OutFile $pwshZip -DisplayName "PowerShell 7") {
+        $pwshDir = "$tools\pwsh"
+        New-Item $pwshDir -ItemType Directory -Force | Out-Null
+        Expand-Archive -Path $pwshZip -DestinationPath $pwshDir -Force
+        Write-Status "PowerShell 7 extracted ($(Format-FileSize (Get-DirectorySize $pwshDir)))" -Type Success
+    }
+
+    # ── 3. Bootstrap 7-Zip (needed to extract Chrome installer) ──
+    Write-Status "--- 7-Zip Bootstrap ---" -Type Info
+    $sevenZipExe = $null
+
+    # Check if 7z is already available on build system
+    $sys7z = Get-Command 7z.exe -ErrorAction SilentlyContinue
+    if ($sys7z) {
+        $sevenZipExe = $sys7z.Source
+        Write-Status "Using system 7-Zip: $sevenZipExe" -Type Success
+    }
+    else {
+        # Download 7zr.exe (standalone reduced 7-Zip console, official, tiny ~600KB)
+        $sevenZr = "$downloads\7zr.exe"
+        if (Invoke-Download -Url $config.SevenZipBootUrl -OutFile $sevenZr -DisplayName "7zr.exe (bootstrap)") {
+            $sevenZipExe = $sevenZr
+            Write-Status "7-Zip bootstrap ready" -Type Success
         }
     }
-    
-    # Download WinXShell individual binaries from wimbuilder2 vendor
-    # (no .NET required - purpose-built for WinPE, Lua-scripted shell)
-    Write-Status "Downloading WinXShell (WinPE-native shell)..." -Type Info
+
+    # ── 4. Chrome — extract portable files from installer exe ──
+    # PhoenixPE approach: the Chrome uncompressed installer is a self-extracting archive.
+    # We use 7-Zip to extract Chrome-bin\ from it.  No MSI needed.
+    Write-Status "--- Google Chrome (portable extraction) ---" -Type Info
+    $chromeExe = "$downloads\chrome_installer.exe"
+    if (Invoke-Download -Url $config.ChromeUrl -OutFile $chromeExe -DisplayName "Chrome Installer") {
+        $chromeDir = "$tools\chrome"
+        $chromeTmp = "$downloads\chrome_extract"
+        New-Item $chromeDir -ItemType Directory -Force | Out-Null
+        New-Item $chromeTmp -ItemType Directory -Force | Out-Null
+
+        if ($sevenZipExe) {
+            Write-Status "Extracting Chrome with 7-Zip..." -Type Info
+            & $sevenZipExe x "$chromeExe" -o"$chromeTmp" -y 2>&1 | Out-Null
+
+            # Look for chrome.7z inside (common structure)
+            $chrome7z = Get-ChildItem $chromeTmp -Recurse -Filter "chrome.7z" | Select-Object -First 1
+            if ($chrome7z) {
+                Write-Status "Found chrome.7z, extracting inner archive..." -Type Info
+                & $sevenZipExe x "$($chrome7z.FullName)" -o"$chromeTmp\inner" -y 2>&1 | Out-Null
+            }
+
+            # Find Chrome-bin directory (PhoenixPE layout)
+            $chromeBin = Get-ChildItem $chromeTmp -Recurse -Directory -Filter "Chrome-bin" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($chromeBin) {
+                Copy-Item "$($chromeBin.FullName)\*" -Destination $chromeDir -Recurse -Force
+                Write-Status "Chrome extracted from Chrome-bin ($(Format-FileSize (Get-DirectorySize $chromeDir)))" -Type Success
+            }
+            else {
+                # Fallback: some installer layouts just have the files directly
+                $chromeExeInner = Get-ChildItem $chromeTmp -Recurse -Filter "chrome.exe" | Select-Object -First 1
+                if ($chromeExeInner) {
+                    Copy-Item (Split-Path $chromeExeInner.FullName -Parent) -Destination $chromeDir -Recurse -Force
+                    Write-Status "Chrome extracted (fallback layout)" -Type Warning
+                }
+                else {
+                    Copy-Item "$chromeTmp\*" -Destination $chromeDir -Recurse -Force
+                    Write-Status "Chrome extracted (raw copy)" -Type Warning
+                }
+            }
+        }
+        else {
+            Write-Status "Could not obtain 7-Zip — Chrome extraction SKIPPED" -Type Error
+        }
+
+        Remove-Item $chromeTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # ── 5. 7-Zip portable console (for inclusion in the WinPE image) ──
+    Write-Status "--- 7-Zip Portable (for PE image) ---" -Type Info
+    $sevenZipDir = "$tools\7zip"
+    New-Item $sevenZipDir -ItemType Directory -Force | Out-Null
+    # Copy the bootstrap 7zr.exe into the image tools
+    if ($sevenZipExe -and (Test-Path $sevenZipExe)) {
+        Copy-Item $sevenZipExe "$sevenZipDir\7zr.exe" -Force
+        Write-Status "7-Zip portable console included in image" -Type Success
+    }
+
+    # ── 6. WinXShell — download COMPLETE file set from wimbuilder2 ──
+    Write-Status "--- WinXShell Desktop Shell ---" -Type Info
     $wxsDir = "$tools\winxshell"
     New-Item $wxsDir -ItemType Directory -Force | Out-Null
+
     $wxsBase = $config.WinXShellBase
-    $wxsFiles = @(
+    $wxsOk = $true
+
+    # Root executables and config files
+    $wxsRootFiles = @(
         "WinXShell_x64.exe",
         "WinXShellC_x64.exe",
         "WinXShell.lua",
@@ -194,30 +335,73 @@ function Invoke-ApplicationPrep {
         "wxsStub32.dll",
         "wallpaper.jpg"
     )
-    $wxsOk = $true
-    foreach ($wxsFile in $wxsFiles) {
-        $wxsDest = Join-Path $wxsDir $wxsFile
-        if (-not (Invoke-Download -Url "$wxsBase/$wxsFile" -OutFile $wxsDest -DisplayName "WinXShell/$wxsFile")) {
+    foreach ($f in $wxsRootFiles) {
+        if (-not (Invoke-Download -Url "$wxsBase/$f" -OutFile "$wxsDir\$f" -DisplayName "WinXShell/$f")) {
             $wxsOk = $false
         }
     }
-    # Download wxsUI subfolder (taskbar/tray UI components)
+
+    # FileExpRefresh subdirectory (needed for file explorer integration)
+    $ferDir = "$wxsDir\FileExpRefresh"
+    New-Item $ferDir -ItemType Directory -Force | Out-Null
+    foreach ($f in @("wxsStub.dll", "wxsStub32.dll")) {
+        Invoke-Download -Url "$wxsBase/FileExpRefresh/$f" -OutFile "$ferDir\$f" -DisplayName "FileExpRefresh/$f" | Out-Null
+    }
+
+    # wxsUI subdirectory — provides taskbar, system tray, WiFi, volume, etc.
     $wxsUIDir = "$wxsDir\wxsUI"
     New-Item $wxsUIDir -ItemType Directory -Force | Out-Null
-    $wxsUIFiles = @("UI_WIFI", "UI_Volume", "UI_Taskbar", "UI_StartMenu")
-    foreach ($uiComp in $wxsUIFiles) {
-        $uiDest = "$wxsUIDir\$uiComp"
-        New-Item $uiDest -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+
+    # Lua scripts and font files
+    $wxsUIRootFiles = @(
+        "KeyboardLayout.lua",
+        "SegoeIcons.ttf",
+        "segmdl2.ttf",
+        "UI_Settings.lua",
+        "UI_Shutdown.lua"
+    )
+    foreach ($f in $wxsUIRootFiles) {
+        Invoke-Download -Url "$wxsBase/wxsUI/$f" -OutFile "$wxsUIDir\$f" -DisplayName "wxsUI/$f" | Out-Null
     }
+
+    # wxsUI ZIPs — these are the actual UI panel modules (taskbar, tray, WiFi, etc.)
+    # Without these, WinXShell shows a blank desktop with no controls!
+    $wxsUIZips = @(
+        "UI_Calendar.zip",
+        "UI_DisplaySwitch.zip",
+        "UI_LED.zip",
+        "UI_Launcher.zip",
+        "UI_Logon.zip",
+        "UI_Resolution.zip",
+        "UI_Sample.zip",
+        "UI_Settings.zip",
+        "UI_Shutdown.zip",
+        "UI_SystemInfo.zip",
+        "UI_TrayPanel.zip",
+        "UI_Volume.zip",
+        "UI_WIFI.zip"
+    )
+    foreach ($z in $wxsUIZips) {
+        Invoke-Download -Url "$wxsBase/wxsUI/$z" -OutFile "$wxsUIDir\$z" -DisplayName "wxsUI/$z" | Out-Null
+    }
+
+    # UI_NotifyInfo subdirectory
+    New-Item "$wxsUIDir\UI_NotifyInfo" -ItemType Directory -Force | Out-Null
+
     if ($wxsOk) {
-        Write-Status "WinXShell downloaded successfully" -Type Success
-    } else {
-        Write-Status "Some WinXShell files failed - shell may be incomplete" -Type Warning
+        Write-Status "WinXShell downloaded with all UI components" -Type Success
     }
-    
-    # Create bin directory for executables
+    else {
+        Write-Status "Some WinXShell core files failed — shell may not start" -Type Error
+    }
+
+    # Create PATH directories
     New-Item "$tools\bin" -ItemType Directory -Force | Out-Null
-    
+    New-Item "$tools\scripts" -ItemType Directory -Force | Out-Null
+
+    # Report totals
+    $totalSize = Get-DirectorySize $tools
+    Write-Status "Total tools size: $(Format-FileSize $totalSize)" -Type Info
     Write-Status "Application preparation complete" -Type Success
 }
 
@@ -226,64 +410,137 @@ function Invoke-ApplicationPrep {
 # ====================================
 function Invoke-WinRECustomization {
     Write-Status "=== Mounting and Customizing WinRE ===" -Type Info
-    
+
     $bootWim = "$Workspace\Media\sources\boot.wim"
-    
+
     if (-not (Test-Path $bootWim)) {
         Write-Status "boot.wim not found at $bootWim" -Type Error
         return $false
     }
-    
+
     # Mount WIM
     Write-Status "Mounting boot.wim..." -Type Info
     New-Item $Mount -ItemType Directory -Force | Out-Null
-    
     Mount-WindowsImage -ImagePath $bootWim -Index 1 -Path $Mount
-    
-    # Copy tools
-    Write-Status "Copying tools to WinRE..." -Type Info
+
+    # Copy tools into the image
+    Write-Status "Copying tools to WinRE (X:\Tools)..." -Type Info
     $toolsMount = "$Mount\Tools"
     Copy-Item "$BuildPayload\tools" -Destination $toolsMount -Recurse -Force
-    
-    # Create Tools directory structure
+
+    # Ensure directory structure
     New-Item "$Mount\Tools\bin" -ItemType Directory -Force | Out-Null
     New-Item "$Mount\Tools\scripts" -ItemType Directory -Force | Out-Null
-    
-    # Configure Registry for Java
-    Write-Status "Configuring Java environment..." -Type Info
-    
+
+    # ── Configure Registry ──
+    Write-Status "Configuring offline registry..." -Type Info
+
     $systemReg = "$Mount\Windows\System32\Config\SYSTEM"
     $softwareReg = "$Mount\Windows\System32\Config\SOFTWARE"
-    
-    # Load SYSTEM hive
-    reg load HKLM\WinRE $systemReg 2>$null
-    
-    # Set JAVA_HOME
-    reg add "HKLM\WinRE\ControlSet001\Control\Session Manager\Environment" `
+
+    # Load SYSTEM hive → set JAVA_HOME and PATH
+    reg load HKLM\WinRE_SYS $systemReg 2>$null
+
+    reg add "HKLM\WinRE_SYS\ControlSet001\Control\Session Manager\Environment" `
         /v JAVA_HOME /t REG_SZ /d "X:\Tools\java" /f 2>$null
-    
-    # Set PATH - include all tools including WinXShell
-    reg add "HKLM\WinRE\ControlSet001\Control\Session Manager\Environment" `
+
+    reg add "HKLM\WinRE_SYS\ControlSet001\Control\Session Manager\Environment" `
         /v PATH /t REG_EXPAND_SZ `
-        /d "X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\winxshell;%PATH%" /f 2>$null
-    
-    reg unload HKLM\WinRE 2>$null
-    
-    # Load SOFTWARE hive
-    reg load HKLM\WinRESW $softwareReg 2>$null
-    
-    # Register .JAR files
-    reg add "HKLM\WinRESW\Classes\.jar" /ve /t REG_SZ /d "jarfile" /f 2>$null
-    reg add "HKLM\WinRESW\Classes\jarfile\shell\open\command" `
+        /d "X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\chrome;X:\Tools\winxshell;X:\Tools\7zip;%PATH%" /f 2>$null
+
+    reg unload HKLM\WinRE_SYS 2>$null
+
+    # Load SOFTWARE hive → set shell, file associations
+    reg load HKLM\WinRE_SW $softwareReg 2>$null
+
+    # Register .jar file association
+    reg add "HKLM\WinRE_SW\Classes\.jar" /ve /t REG_SZ /d "IBM.jarfile" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\.jar" /v "Content Type" /t REG_SZ /d "application/jar" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\IBM.jarfile" /ve /t REG_SZ /d "IBM Semeru JAR file" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\IBM.jarfile\shell\open" /ve /t REG_SZ /d "Open" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\IBM.jarfile\shell\open\command" `
         /ve /t REG_SZ /d "\"X:\Tools\java\bin\javaw.exe\" -jar \"%%1\"" /f 2>$null
-    
-    # Set WinXShell as the Windows shell (Winlogon method - same as wimbuilder2/EdgelessPE)
-    # More reliable than winpeshl.ini; survives OSD module modifications to startnet.cmd
-    reg add "HKLM\WinRESW\Microsoft\Windows NT\CurrentVersion\Winlogon" `
+
+    # JavaSoft / Oracle compatibility keys — required by many Java apps that query
+    # HKLM\SOFTWARE\JavaSoft at runtime to locate the JRE (PhoenixPE approach)
+    $jver = $config.JavaSemeruVersion          # e.g. "8.0.422.5"
+    $jShortVer = "1.8"                         # JRE short version for legacy lookups
+    reg add "HKLM\WinRE_SW\JavaSoft\Java Runtime Environment" `
+        /v CurrentVersion /t REG_SZ /d $jShortVer /f 2>$null
+    reg add "HKLM\WinRE_SW\JavaSoft\Java Runtime Environment\$jShortVer" `
+        /v JavaHome /t REG_SZ /d "X:\Tools\java" /f 2>$null
+    reg add "HKLM\WinRE_SW\JavaSoft\Java Runtime Environment\$jShortVer" `
+        /v MicroVersion /t REG_SZ /d "0" /f 2>$null
+    reg add "HKLM\WinRE_SW\JavaSoft\Java Runtime Environment\$jShortVer" `
+        /v RuntimeLib /t REG_SZ /d "X:\Tools\java\bin\server\jvm.dll" /f 2>$null
+    # Also register the Azul/IBM-specific key for apps that look for vendor info
+    reg add "HKLM\WinRE_SW\IBM\Semeru Runtime Open Edition\jre-8" `
+        /v CurrentVersion /t REG_SZ /d $jver /f 2>$null
+    reg add "HKLM\WinRE_SW\IBM\Semeru Runtime Open Edition\jre-8" `
+        /v InstallationPath /t REG_SZ /d "X:\Tools\java\" /f 2>$null
+
+    # Set WinXShell as the Winlogon shell
+    # Same approach as wimbuilder2 / EdgelessPE / PhoenixPE — more reliable than winpeshl.ini
+    # because OSD module can overwrite winpeshl.ini during Edit-OSDCloudWinPE
+    reg add "HKLM\WinRE_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" `
         /v Shell /t REG_SZ /d "X:\Tools\winxshell\WinXShell_x64.exe" /f 2>$null
-    
-    reg unload HKLM\WinRESW 2>$null
-    
+
+    # Register Chrome for http/https/html (like PhoenixPE)
+    reg add "HKLM\WinRE_SW\Classes\http\shell\open\command" `
+        /ve /t REG_SZ /d "\"X:\Tools\chrome\chrome.exe\" \"%1\"" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\https\shell\open\command" `
+        /ve /t REG_SZ /d "\"X:\Tools\chrome\chrome.exe\" \"%1\"" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\.html" /ve /t REG_SZ /d "ChromeHTML" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\.htm" /ve /t REG_SZ /d "ChromeHTML" /f 2>$null
+    reg add "HKLM\WinRE_SW\Classes\ChromeHTML\shell\open\command" `
+        /ve /t REG_SZ /d "\"X:\Tools\chrome\chrome.exe\" \"%1\"" /f 2>$null
+
+    # Chrome master_preferences to disable first-run wizard (PhoenixPE approach)
+    $chromeMasterPrefs = @'
+{
+    "distribution": {
+        "suppress_first_run_bubble": true,
+        "do_not_create_desktop_shortcut": true,
+        "do_not_create_quick_launch_shortcut": true,
+        "do_not_launch_chrome": true,
+        "do_not_register_for_update_launch": true,
+        "make_chrome_default": true,
+        "make_chrome_default_for_user": true,
+        "suppress_first_run_default_browser_prompt": true,
+        "system_level": true
+    },
+    "first_run_tabs": ["about:blank"]
+}
+'@
+    $chromeToolPath = "$Mount\Tools\chrome"
+    if (Test-Path $chromeToolPath) {
+        Set-Content -Path "$chromeToolPath\master_preferences" -Value $chromeMasterPrefs -Encoding UTF8
+    }
+
+    # ── Custom Wallpaper ──
+    $wxsWallpaper = "$Mount\Tools\winxshell\wallpaper.jpg"
+    if (-not [string]::IsNullOrWhiteSpace($WallpaperPath) -and (Test-Path $WallpaperPath)) {
+        Write-Status "Applying custom wallpaper: $WallpaperPath" -Type Info
+        # Copy to WinXShell directory (its primary wallpaper source)
+        Copy-Item $WallpaperPath $wxsWallpaper -Force
+        # Also place in the standard Windows Web wallpaper location
+        $webWallpaperDir = "$Mount\Windows\Web\Wallpaper"
+        New-Item $webWallpaperDir -ItemType Directory -Force | Out-Null
+        Copy-Item $WallpaperPath "$webWallpaperDir\wallpaper$([System.IO.Path]::GetExtension($WallpaperPath))" -Force
+        # Set system wallpaper registry key
+        reg add "HKLM\WinRE_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" `
+            /v Wallpaper /t REG_SZ `
+            /d "X:\Windows\Web\Wallpaper\wallpaper$([System.IO.Path]::GetExtension($WallpaperPath))" /f 2>$null
+        Write-Status "Custom wallpaper applied" -Type Success
+    }
+    else {
+        if (-not [string]::IsNullOrWhiteSpace($WallpaperPath)) {
+            Write-Status "WallpaperPath '$WallpaperPath' not found — using default WinXShell wallpaper" -Type Warning
+        }
+    }
+
+    reg unload HKLM\WinRE_SW 2>$null
+
     Write-Status "Registry configuration complete" -Type Success
 }
 
@@ -292,62 +549,100 @@ function Invoke-WinRECustomization {
 # ====================================
 function Invoke-LauncherSetup {
     Write-Status "=== Creating Launcher Scripts ===" -Type Info
-    
+
     $scriptsDir = "$Mount\Tools\scripts"
-    
-    # Mode Selector Script - runs at boot BEFORE WinXShell takes over as shell
-    # WinXShell is set as Winlogon\Shell, so this script is launched via startnet.cmd
-    # to give the user a choice: OSD Deploy (exits to WinXShell after) or pure Desktop
+
+    # Mode Selector — plain batch menu (NO WPF — WinPE doesn't have PresentationFramework!)
     $modeSelector = @'
-# LiveWinRE Mode Selector
-# Launched from startnet.cmd before WinXShell shell starts
-Add-Type -AssemblyName PresentationFramework
-
-$result = [System.Windows.MessageBox]::Show(
-    "Select Operating Mode:`n`nYes = OSD Deploy (automated deployment)`nNo = Desktop Mode (WinXShell GUI)",
-    "LiveWinRE LiveBoot",
-    "YesNo",
-    "Question"
+@echo off
+title LiveWinRE - Mode Selector
+echo.
+echo  ============================================
+echo   LiveWinRE LiveBoot - Mode Selector
+echo  ============================================
+echo.
+echo   1 = OSD Cloud Deploy (automated deployment)
+echo   2 = Desktop Mode    (WinXShell GUI)
+echo.
+set /p choice="  Select [1-2]: "
+if "%choice%"=="1" (
+    echo.
+    echo  Starting OSD Cloud Deployment...
+    X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NoExit -Command "Import-Module OSD -Force -ErrorAction SilentlyContinue; Start-OSDCloudGUI"
 )
-
-if ($result -eq "Yes") {
-    # Launch OSD deployment GUI - WinXShell will still start as shell after
-    Import-Module OSD -Force -ErrorAction SilentlyContinue
-    Start-OSDCloudGUI
-}
-# Either way, WinXShell_x64.exe starts as shell via Winlogon\Shell registry key
+echo  Starting WinXShell desktop...
+rem WinXShell starts automatically via Winlogon\Shell registry
 '@
-    Set-Content -Path "$scriptsDir\ModeSelector.ps1" -Value $modeSelector -Encoding UTF8
-    
-    # Desktop shortcut for OSD Deploy
-    Write-Status "Creating shortcuts..." -Type Info
-    
-    New-Item "$Mount\Users\Default\Desktop" -ItemType Directory -Force | Out-Null
-    
-    $wsh = New-Object -ComObject WScript.Shell
-    
-    # OSD Deploy Shortcut
-    $osdShortcut = $wsh.CreateShortcut("$Mount\Users\Default\Desktop\OSD Deploy.lnk")
-    $osdShortcut.TargetPath = "X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $osdShortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -Command Start-OSDCloudGUI"
-    $osdShortcut.WorkingDirectory = "X:\Windows\System32"
-    $osdShortcut.Save()
-    
-    # Chrome Shortcut
-    $chromeShortcut = $wsh.CreateShortcut("$Mount\Users\Default\Desktop\Chrome Browser.lnk")
-    $chromeShortcut.TargetPath = "X:\Tools\chrome\chrome.exe"
-    $chromeShortcut.Save()
-    
-    # PowerShell Shortcut
-    $pwshShortcut = $wsh.CreateShortcut("$Mount\Users\Default\Desktop\PowerShell.lnk")
-    $pwshShortcut.TargetPath = "X:\Tools\pwsh\pwsh.exe"
-    $pwshShortcut.Save()
-    
-    # File Manager Shortcut
-    $fileShortcut = $wsh.CreateShortcut("$Mount\Users\Default\Desktop\File Explorer.lnk")
-    $fileShortcut.TargetPath = "X:\Windows\explorer.exe"
-    $fileShortcut.Save()
-    
+    Set-Content -Path "$scriptsDir\ModeSelector.cmd" -Value $modeSelector -Encoding ASCII
+
+    # OSD Deploy launcher
+    $osdLauncher = @'
+@echo off
+title OSD Cloud Deploy
+X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NoExit -Command "Import-Module OSD -Force -ErrorAction SilentlyContinue; Start-OSDCloudGUI"
+'@
+    Set-Content -Path "$scriptsDir\OSD-Deploy.cmd" -Value $osdLauncher -Encoding ASCII
+
+    # Chrome launcher (with WinPE-safe flags)
+    $chromeLauncher = @'
+@echo off
+start "" "X:\Tools\chrome\chrome.exe" --no-first-run --no-default-browser-check --disable-background-networking --disable-sync %*
+'@
+    Set-Content -Path "$scriptsDir\Chrome.cmd" -Value $chromeLauncher -Encoding ASCII
+
+    # PowerShell 7 launcher
+    $pwshLauncher = @'
+@echo off
+"X:\Tools\pwsh\pwsh.exe" -NoLogo -NoExit %*
+'@
+    Set-Content -Path "$scriptsDir\PowerShell7.cmd" -Value $pwshLauncher -Encoding ASCII
+
+    # Command Prompt with environment
+    $cmdLauncher = @'
+@echo off
+title LiveWinRE Command Prompt
+set PATH=X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\chrome;X:\Tools\winxshell;X:\Tools\7zip;%PATH%
+set JAVA_HOME=X:\Tools\java
+echo.
+echo  LiveWinRE Command Prompt
+echo  Java: X:\Tools\java    Chrome: X:\Tools\chrome
+echo  PS7:  X:\Tools\pwsh    7-Zip:  X:\Tools\7zip
+echo.
+cmd /k
+'@
+    Set-Content -Path "$scriptsDir\CommandPrompt.cmd" -Value $cmdLauncher -Encoding ASCII
+
+    # Copy launchers to bin (so they're on PATH)
+    Copy-Item "$scriptsDir\*.cmd" "$Mount\Tools\bin\" -Force
+
+    # Create desktop shortcuts
+    $desktopDir = "$Mount\Users\Default\Desktop"
+    New-Item $desktopDir -ItemType Directory -Force | Out-Null
+
+    $shortcuts = @(
+        @{ Name = "OSD Deploy";     Target = "X:\Tools\scripts\OSD-Deploy.cmd" }
+        @{ Name = "Chrome Browser"; Target = "X:\Tools\scripts\Chrome.cmd" }
+        @{ Name = "PowerShell 7";   Target = "X:\Tools\pwsh\pwsh.exe" }
+        @{ Name = "Command Prompt"; Target = "X:\Tools\scripts\CommandPrompt.cmd" }
+    )
+
+    foreach ($sc in $shortcuts) {
+        try {
+            $wsh = New-Object -ComObject WScript.Shell
+            $lnk = $wsh.CreateShortcut("$desktopDir\$($sc.Name).lnk")
+            $lnk.TargetPath = $sc.Target
+            $lnk.WorkingDirectory = "X:\Tools"
+            $lnk.Save()
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
+        }
+        catch {
+            # Fallback: create a .cmd on the desktop
+            Write-Status "COM shortcut failed for $($sc.Name), using .cmd fallback" -Type Warning
+            Set-Content -Path "$desktopDir\$($sc.Name).cmd" `
+                        -Value "@echo off`nstart `"`" `"$($sc.Target)`"" -Encoding ASCII
+        }
+    }
+
     Write-Status "Launcher setup complete" -Type Success
 }
 
@@ -356,28 +651,112 @@ if ($result -eq "Yes") {
 # ====================================
 function Invoke-WinPEShellConfig {
     Write-Status "=== Configuring WinPE Shell ===" -Type Info
-    
-    # Strategy (same as wimbuilder2/EdgelessPE):
-    # 1. Winlogon\Shell = WinXShell_x64.exe  (set in registry during Invoke-WinRECustomization)
-    # 2. startnet.cmd runs ModeSelector.ps1 FIRST (before shell loads)
-    # 3. WinXShell then starts as the desktop shell automatically
-    # This avoids winpeshl.ini conflicts with OSD module
-    
+
+    # Strategy:
+    # 1. Winlogon\Shell = WinXShell_x64.exe  (set via registry in Step 3)
+    # 2. startnet.cmd: PRESERVE the OSD-written WiFi init block, APPEND our mode selector
+    # 3. Remove winpeshl.ini so WinPE uses standard Winlogon shell loading
+    #
+    # CRITICAL — WiFi preservation:
+    #   Edit-OSDCloudWinPE (Step 1) already wrote startnet.cmd with:
+    #     wpeinit
+    #     PowerShell -Nol -C Initialize-OSDCloudStartnet -WirelessConnect
+    #     PowerShell -Nol -C Initialize-OSDCloudStartnetUpdate
+    #   Initialize-OSDCloudStartnet checks for dmcmnutils.dll, calls Start-WinREWiFi
+    #   which presents the WiFi connection GUI and waits for a valid IP before
+    #   continuing. If we overwrite startnet.cmd we lose ALL of this.
+    #
+    #   We therefore READ the OSD content, strip only the OSD launch tail
+    #   ('start PowerShell -NoL' and any blank lines after it), then
+    #   APPEND our environment setup and mode selector.
+
     $startnetPath = "$Mount\Windows\System32\startnet.cmd"
-    $startnet = @"
-@echo off
-wpeinit
-rem === LiveWinRE Boot Sequence ===
-rem Run mode selector (OSD Deploy vs Desktop) before shell starts
-X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NonInteractive -File X:\Tools\scripts\ModeSelector.ps1
-rem WinXShell starts automatically as shell via Winlogon registry
+
+    # --- Read OSD-written startnet.cmd (produced by Edit-OSDCloudWinPE) ---
+    $osdStartnet = ''
+    if (Test-Path $startnetPath) {
+        $osdStartnet = Get-Content $startnetPath -Raw -Encoding ASCII
+        Write-Status "Existing OSD startnet.cmd found — preserving WiFi init block" -Type Info
+
+        # Verify the WiFi init call is present
+        if ($osdStartnet -match 'Initialize-OSDCloudStartnet') {
+            Write-Status "WiFi init (Initialize-OSDCloudStartnet) confirmed in startnet.cmd" -Type Success
+        }
+        else {
+            Write-Status "WARNING: Initialize-OSDCloudStartnet not found in OSD startnet.cmd — WiFi may not work" -Type Warning
+        }
+
+        # Strip the OSD-appended tail: '@ECHO OFF\r?\nstart PowerShell -NoL' and everything after.
+        # OSD adds this when no -StartOSDCloud* flag is passed.
+        $osdStartnet = $osdStartnet -replace '(?i)@ECHO OFF\r?\nstart PowerShell.*?(\r?\n|$)', ''
+        # Also strip any trailing blank lines so our append is clean
+        $osdStartnet = $osdStartnet.TrimEnd()
+    }
+    else {
+        Write-Status "OSD startnet.cmd not found — building from scratch (WiFi init may be missing!)" -Type Warning
+        $osdStartnet = "@ECHO OFF`r`nwpeinit`r`ncd\\"
+    }
+
+    # --- Append our custom LiveWinRE launcher block ---
+    $customBlock = @"
+
+rem ==============================================================
+rem  LiveWinRE Custom Launcher (appended by Build-OSDCloud-Clean)
+rem  OSD WiFi init block above is intentionally preserved.
+rem ==============================================================
+
+rem Environment: make all portable tools available from any shell
+set PATH=X:\Tools\bin;X:\Tools\java\bin;X:\Tools\pwsh;X:\Tools\chrome;X:\Tools\winxshell;X:\Tools\7zip;%PATH%
+set JAVA_HOME=X:\Tools\java
+
+rem Show mode selector (OSD Deploy vs WinXShell Desktop)
+call X:\Tools\scripts\ModeSelector.cmd
+
+rem WinXShell starts automatically as the desktop shell via Winlogon\Shell registry key.
 "@
-    Set-Content -Path $startnetPath -Value $startnet -Encoding ASCII
-    
-    # Remove winpeshl.ini so WinPE uses standard Winlogon shell loading
-    Remove-Item "$Mount\Windows\System32\winpeshl.ini" -Force -ErrorAction SilentlyContinue
-    
-    Write-Status "WinPE shell configured (WinXShell via Winlogon + startnet.cmd)" -Type Success
+
+    $finalStartnet = $osdStartnet + $customBlock
+    Set-Content -Path $startnetPath -Value $finalStartnet -Encoding ASCII
+
+    Write-Status "startnet.cmd updated (OSD WiFi block preserved, LiveWinRE launcher appended)" -Type Success
+
+    # Remove winpeshl.ini — let Winlogon handle shell startup instead
+    $winpeshlPath = "$Mount\Windows\System32\winpeshl.ini"
+    if (Test-Path $winpeshlPath) {
+        Remove-Item $winpeshlPath -Force -ErrorAction SilentlyContinue
+        Write-Status "Removed winpeshl.ini (using Winlogon shell instead)" -Type Info
+    }
+
+    Write-Status "WinPE shell configured (WinXShell via Winlogon + startnet.cmd with WiFi)" -Type Success
+}
+
+# ====================================
+# STEP 5b: INJECT EXTRA DRIVERS
+# ====================================
+function Invoke-DriverInjection {
+    if ([string]::IsNullOrWhiteSpace($DriversPath) -or -not (Test-Path $DriversPath)) {
+        Write-Status "Drivers folder not found at '$DriversPath' — skipping driver injection" -Type Info
+        return
+    }
+
+    $infFiles = Get-ChildItem -Path $DriversPath -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue
+    if ($infFiles.Count -eq 0) {
+        Write-Status "Drivers folder is empty (no .inf files found) — skipping driver injection" -Type Warning
+        return
+    }
+
+    Write-Status "=== Injecting Extra Drivers ($($infFiles.Count) .inf files found) ===" -Type Info
+    Write-Status "Source: $DriversPath" -Type Info
+
+    try {
+        $result = Add-WindowsDriver -Path $Mount -Driver $DriversPath -Recurse -ErrorAction Stop
+        $injected = @($result).Count
+        Write-Status "Driver injection complete — $injected driver package(s) added to image" -Type Success
+    }
+    catch {
+        Write-Status "Driver injection failed: $_" -Type Error
+        Write-Status "Build will continue — drivers were NOT injected" -Type Warning
+    }
 }
 
 # ====================================
@@ -385,10 +764,14 @@ rem WinXShell starts automatically as shell via Winlogon registry
 # ====================================
 function Invoke-WinRECommit {
     Write-Status "=== Committing WinRE Changes ===" -Type Info
-    
+
+    # Report image size before commit
+    $toolsSize = Get-DirectorySize "$Mount\Tools"
+    Write-Status "Tools payload size: $(Format-FileSize $toolsSize)" -Type Info
+
     Dismount-WindowsImage -Path $Mount -Save
     Write-Status "WinRE image committed" -Type Success
-    
+
     # Clean mount directory
     Remove-Item $Mount -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -398,69 +781,77 @@ function Invoke-WinRECommit {
 # ====================================
 function Invoke-ISOBuild {
     Write-Status "=== Building ISO Image ===" -Type Info
-    
+
     Import-Module OSD -Force
-    
+
     New-OSDCloudISO -WorkspacePath $Workspace
-    
+
     $isoPath = Get-ChildItem "$Workspace\*.iso" -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($isoPath) {
         $sizeGB = $isoPath.Length / 1GB
         Write-Status "ISO created: $($isoPath.FullName) ($([math]::Round($sizeGB, 2)) GB)" -Type Success
     }
+    else {
+        Write-Status "ISO file not found after build — check OSD module output" -Type Error
+    }
 }
-
-
 
 # ====================================
 # MAIN EXECUTION
 # ====================================
 function Invoke-Main {
-    Write-Host "`n"
-    Write-Status "=== OSDCloud Clean WinRE Builder ===" -Type Info
-    Write-Status "Mode: $Mode | Version: $($config.Version) | Build: $($config.BuildDate)" -Type Info
-    Write-Host "`n"
-    
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-Host ""
+    Write-Status "=== OSDCloud Clean WinRE Builder v$($config.Version) ===" -Type Info
+    Write-Status "Mode: $Mode | Build: $($config.BuildDate)" -Type Info
+    Write-Status "All downloads are PORTABLE — no MSI, no installers" -Type Info
+    Write-Host ""
+
     # Step 0: Initialize
     if ($Mode -in 'BuildWinRE', 'Full') {
         Initialize-BuildEnvironment
     }
-    
+
     # Step 1: OSD Setup
     if ($Mode -in 'BuildWinRE', 'Full') {
         Invoke-OSDCloudSetup
     }
-    
-    # Step 2: Download Apps
+
+    # Step 2: Download portable apps
     if ($Mode -in 'BuildWinRE', 'Full') {
         Invoke-ApplicationPrep
     }
-    
-    # Step 3: Mount & Customize
+
+    # Step 3-5: Mount, customize, configure shell
     if ($Mode -in 'BuildWinRE', 'Full') {
         Invoke-WinRECustomization
         Invoke-LauncherSetup
         Invoke-WinPEShellConfig
+        Invoke-DriverInjection   # inject extra drivers while WIM is still mounted
         Invoke-WinRECommit
     }
-    
-    # Step 4: Build ISO
+
+    # Step 6: Build ISO
     if ($Mode -in 'BuildISO', 'Full') {
         Invoke-ISOBuild
     }
-    
 
-    
-    Write-Host "`n"
+    $stopwatch.Stop()
+    $elapsed = $stopwatch.Elapsed
+
+    Write-Host ""
     Write-Status "=== Build Complete ===" -Type Success
+    Write-Status "Elapsed: $($elapsed.ToString('hh\:mm\:ss'))" -Type Info
     Write-Status "Workspace: $Workspace" -Type Info
-    
+
     if (Test-Path "$Workspace\*.iso") {
         $iso = Get-ChildItem "$Workspace\*.iso" | Select-Object -Last 1
         Write-Status "ISO Location: $($iso.FullName)" -Type Info
+        Write-Status "ISO Size: $(Format-FileSize $iso.Length)" -Type Info
     }
-    
-    Write-Host "`n"
+
+    Write-Host ""
 }
 
 # Execute
