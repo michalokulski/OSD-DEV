@@ -4,7 +4,9 @@
 # ====================================
 
 param(
-    [string]$Workspace = "C:\OSDCloud\LiveWinRE"
+    [string]$Workspace    = "C:\OSDCloud\LiveWinRE",
+    [string]$Mount        = "C:\Mount",
+    [string]$BuildPayload = "C:\BuildPayload"
 )
 
 #Requires -RunAsAdministrator
@@ -34,15 +36,85 @@ function Show-Menu {
     Write-Host " 8) Check Build Status"
     Write-Host " 9) Verify Environment (pre-flight checks)"
     Write-Host ""
+    Write-Host " C) Clean Build Artifacts (prepare for fresh run)" -ForegroundColor Yellow
+    Write-Host ""
     Write-Host " 0) Exit"
     Write-Host ""
+}
+
+function Invoke-CleanEnvironment {
+    Clear-Host
+    Write-Status "=== Clean Build Artifacts ==========================" -Type Header
+    Write-Host ""
+    Write-Host " Paths that will be cleaned:"
+    Write-Host "   Mount      : $Mount"
+    Write-Host "   BuildPayload: $BuildPayload"
+    Write-Host "   Workspace  : $Workspace (Media + ISOs)"
+    Write-Host ""
+    Write-Host " Choose scope:"
+    Write-Host ""
+    Write-Host "  1) Temp only  — dismount WIM, remove Mount + BuildPayload"
+    Write-Host "  2) Full clean — temp files AND Workspace (Media, ISO, logs)"
+    Write-Host "  B) Back"
+    Write-Host ""
+    Write-Host -NoNewline " Select [1/2/B]: "
+    $sub = (Read-Host).Trim().ToUpper()
+
+    switch ($sub) {
+        '1' {
+            Write-Status "Cleaning temporary build files..." -Type Warning
+            # Dismount any stale WIM
+            $stale = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -ieq $Mount }
+            if ($stale) {
+                Write-Status "Dismounting stale WIM at $Mount ..." -Type Warning
+                Dismount-WindowsImage -Path $Mount -Discard -ErrorAction SilentlyContinue
+            }
+            # Also unload any orphaned registry hives from a failed build
+            reg unload "HKLM\WinRE_SW"  2>$null
+            reg unload "HKLM\WinRE_SYS" 2>$null
+            if (Test-Path $Mount)        { Remove-Item $Mount        -Recurse -Force -ErrorAction SilentlyContinue; Write-Status "Removed: $Mount" -Type Success }
+            if (Test-Path $BuildPayload) { Remove-Item $BuildPayload -Recurse -Force -ErrorAction SilentlyContinue; Write-Status "Removed: $BuildPayload" -Type Success }
+            Write-Status "Temp clean complete. Workspace ($Workspace) untouched." -Type Success
+        }
+        '2' {
+            Write-Status "WARNING: This removes ALL build artifacts including any generated ISOs!" -Type Error
+            Write-Host -NoNewline " Type YES to confirm: "
+            $confirm = (Read-Host).Trim()
+            if ($confirm -ceq 'YES') {
+                # Dismount / unload first
+                $stale = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Path -ieq $Mount }
+                if ($stale) {
+                    Write-Status "Dismounting stale WIM at $Mount ..." -Type Warning
+                    Dismount-WindowsImage -Path $Mount -Discard -ErrorAction SilentlyContinue
+                }
+                reg unload "HKLM\WinRE_SW"  2>$null
+                reg unload "HKLM\WinRE_SYS" 2>$null
+                foreach ($p in @($Mount, $BuildPayload, $Workspace)) {
+                    if (Test-Path $p) {
+                        Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+                        Write-Status "Removed: $p" -Type Success
+                    }
+                }
+                Write-Status "Full clean complete. Environment is ready for a fresh build." -Type Success
+            } else {
+                Write-Status "Cancelled — nothing was removed." -Type Warning
+            }
+        }
+        'B' { Clear-Host; return }
+        default { Write-Status "Invalid selection." -Type Warning }
+    }
+    Write-Host ""
+    Read-Host "Press Enter to continue"
+    Clear-Host
 }
 
 function Invoke-Menu {
     do {
         Show-Menu
-        Write-Host -NoNewline " Select [0-9]: "
-        $choice = Read-Host
+        Write-Host -NoNewline " Select [0-9, C]: "
+        $choice = (Read-Host).Trim()
         
         switch ($choice) {
             '1' {
@@ -143,12 +215,15 @@ function Invoke-Menu {
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
+            { $_ -in 'C','c' } {
+                Invoke-CleanEnvironment
+            }
             '0' {
                 Write-Status "Exiting..." -Type Info
                 exit 0
             }
             default {
-                Write-Status "Invalid option. Please select 0-9." -Type Warning
+                Write-Status "Invalid option. Please select 0-9 or C." -Type Warning
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
