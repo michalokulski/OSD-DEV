@@ -55,14 +55,10 @@ $config = @{
     PowerShellUrl   = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.zip"
 
     # WinXShell: purpose-built WinPE shell (Lua-scripted, no .NET required)
-    # Primary source  : wimbuilder2 vendor directory — tracked on master branch for automatic updates
-    #   https://github.com/slorelee/wimbuilder2/tree/master/vendor/WinXShell
-    # Fallback / known-good: pinned commit fc0c932 (2026-01-02) — used if master branch download fails
-    # To pin to a different commit: update WinXShellFallbackCommit to the desired SHA.
-    # PhoenixPE (https://github.com/PhoenixPE/PhoenixPE) also ships WinXShell and is an additional
-    # upstream to watch for version bumps.
-    WinXShellBase          = "https://raw.githubusercontent.com/slorelee/wimbuilder2/master/vendor/WinXShell/X_PF/WinXShell"
-    WinXShellFallbackBase  = "https://raw.githubusercontent.com/slorelee/wimbuilder2/fc0c93297429800086736c145936a66b657dfdf2/vendor/WinXShell/X_PF/WinXShell"
+    # Source: wimbuilder2 vendor directory — PINNED to commit fc0c932 (2026-01-02)
+    # To upgrade: check https://github.com/slorelee/wimbuilder2/commits/master/vendor/WinXShell
+    # then update both the SHA below and the comment above.
+    WinXShellBase   = "https://raw.githubusercontent.com/slorelee/wimbuilder2/fc0c93297429800086736c145936a66b657dfdf2/vendor/WinXShell/X_PF/WinXShell"
 
     Version         = "2.0.0"
     BuildDate       = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -103,11 +99,12 @@ function Invoke-Download {
             Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 300
 
             if (Test-Path $OutFile) {
-                $size = (Get-Item $OutFile).Length / 1MB
-                if ($size -lt 0.001) {
-                    Write-Status "Downloaded file is empty: $DisplayName" -Type Warning
+                $bytes = (Get-Item $OutFile).Length
+                if ($bytes -eq 0) {
+                    Write-Status "Downloaded file is empty (0 bytes): $DisplayName" -Type Warning
                     continue
                 }
+                $size = $bytes / 1MB
                 Write-Status "Downloaded: $(Split-Path $OutFile -Leaf) ($([math]::Round($size, 2)) MB)" -Type Success
                 return $true
             }
@@ -122,28 +119,6 @@ function Invoke-Download {
     }
 
     Write-Status "FAILED to download $DisplayName after $MaxRetries attempts" -Type Error
-    return $false
-}
-
-function Invoke-DownloadWithFallback {
-    # Downloads a file trying $PrimaryUrl first; on failure falls back to $FallbackUrl.
-    # Returns $true if either succeeds, $false if both fail.
-    param(
-        [string]$PrimaryUrl,
-        [string]$FallbackUrl,
-        [string]$OutFile,
-        [string]$DisplayName
-    )
-
-    if (Invoke-Download -Url $PrimaryUrl -OutFile $OutFile -DisplayName $DisplayName) {
-        return $true
-    }
-    if (-not [string]::IsNullOrWhiteSpace($FallbackUrl)) {
-        Write-Status "Primary URL failed for $DisplayName — trying fallback (pinned commit)..." -Type Warning
-        if (Invoke-Download -Url $FallbackUrl -OutFile $OutFile -DisplayName "$DisplayName [fallback]") {
-            return $true
-        }
-    }
     return $false
 }
 
@@ -207,8 +182,8 @@ function Invoke-OSDCloudSetup {
     # Create WinRE Template
     if (-not (Test-Path "$Workspace\Media")) {
         Write-Status "Creating OSD WinRE template..." -Type Info
-        New-OSDCloudTemplate -Name LiveWinRE -WinRE -Verbose
-        Set-OSDCloudWorkspace $Workspace -Verbose
+        New-OSDCloudTemplate -Name LiveWinRE -WinRE
+        Set-OSDCloudWorkspace $Workspace
     }
     else {
         Write-Status "OSD template exists, using existing..." -Type Warning
@@ -224,8 +199,7 @@ function Invoke-OSDCloudSetup {
     Write-Status "Enhancing WinPE with cloud drivers + WiFi support..." -Type Info
     Edit-OSDCloudWinPE `
         -CloudDriver * `
-        -WirelessConnect `
-        -Verbose
+        -WirelessConnect
 
     Write-Status "OSD Cloud setup complete" -Type Success
 }
@@ -351,8 +325,7 @@ function Invoke-ApplicationPrep {
     $wxsDir = "$tools\winxshell"
     New-Item $wxsDir -ItemType Directory -Force | Out-Null
 
-    $wxsBase     = $config.WinXShellBase
-    $wxsFallback = $config.WinXShellFallbackBase
+    $wxsBase = $config.WinXShellBase
     $wxsOk = $true
 
     # Root executables and config files
@@ -366,11 +339,7 @@ function Invoke-ApplicationPrep {
         "wallpaper.jpg"
     )
     foreach ($f in $wxsRootFiles) {
-        if (-not (Invoke-DownloadWithFallback `
-                -PrimaryUrl  "$wxsBase/$f" `
-                -FallbackUrl "$wxsFallback/$f" `
-                -OutFile     "$wxsDir\$f" `
-                -DisplayName "WinXShell/$f")) {
+        if (-not (Invoke-Download -Url "$wxsBase/$f" -OutFile "$wxsDir\$f" -DisplayName "WinXShell/$f")) {
             $wxsOk = $false
         }
     }
@@ -379,11 +348,7 @@ function Invoke-ApplicationPrep {
     $ferDir = "$wxsDir\FileExpRefresh"
     New-Item $ferDir -ItemType Directory -Force | Out-Null
     foreach ($f in @("wxsStub.dll", "wxsStub32.dll")) {
-        Invoke-DownloadWithFallback `
-            -PrimaryUrl  "$wxsBase/FileExpRefresh/$f" `
-            -FallbackUrl "$wxsFallback/FileExpRefresh/$f" `
-            -OutFile     "$ferDir\$f" `
-            -DisplayName "FileExpRefresh/$f" | Out-Null
+        Invoke-Download -Url "$wxsBase/FileExpRefresh/$f" -OutFile "$ferDir\$f" -DisplayName "FileExpRefresh/$f" | Out-Null
     }
 
     # wxsUI subdirectory — provides taskbar, system tray, WiFi, volume, etc.
@@ -399,11 +364,7 @@ function Invoke-ApplicationPrep {
         "UI_Shutdown.lua"
     )
     foreach ($f in $wxsUIRootFiles) {
-        Invoke-DownloadWithFallback `
-            -PrimaryUrl  "$wxsBase/wxsUI/$f" `
-            -FallbackUrl "$wxsFallback/wxsUI/$f" `
-            -OutFile     "$wxsUIDir\$f" `
-            -DisplayName "wxsUI/$f" | Out-Null
+        Invoke-Download -Url "$wxsBase/wxsUI/$f" -OutFile "$wxsUIDir\$f" -DisplayName "wxsUI/$f" | Out-Null
     }
 
     # wxsUI ZIPs — these are the actual UI panel modules (taskbar, tray, WiFi, etc.)
@@ -424,11 +385,7 @@ function Invoke-ApplicationPrep {
         "UI_WIFI.zip"
     )
     foreach ($z in $wxsUIZips) {
-        Invoke-DownloadWithFallback `
-            -PrimaryUrl  "$wxsBase/wxsUI/$z" `
-            -FallbackUrl "$wxsFallback/wxsUI/$z" `
-            -OutFile     "$wxsUIDir\$z" `
-            -DisplayName "wxsUI/$z" | Out-Null
+        Invoke-Download -Url "$wxsBase/wxsUI/$z" -OutFile "$wxsUIDir\$z" -DisplayName "wxsUI/$z" | Out-Null
     }
 
     # UI_NotifyInfo subdirectory
@@ -466,7 +423,7 @@ function Invoke-WinRECustomization {
     # Mount WIM
     Write-Status "Mounting boot.wim..." -Type Info
     New-Item $Mount -ItemType Directory -Force | Out-Null
-    Mount-WindowsImage -ImagePath $bootWim -Index 1 -Path $Mount -Verbose
+    Mount-WindowsImage -ImagePath $bootWim -Index 1 -Path $Mount
 
     # Copy tools into the image
     Write-Status "Copying tools to WinRE (X:\Tools)..." -Type Info
@@ -523,7 +480,7 @@ function Invoke-WinRECustomization {
     reg add "HKLM\WinRE_SW\Classes\IBM.jarfile" /ve /t REG_SZ /d "IBM Semeru JAR file" /f 2>$null
     reg add "HKLM\WinRE_SW\Classes\IBM.jarfile\shell\open" /ve /t REG_SZ /d "Open" /f 2>$null
     reg add "HKLM\WinRE_SW\Classes\IBM.jarfile\shell\open\command" `
-        /ve /t REG_SZ /d "\"X:\Tools\java\bin\javaw.exe\" -jar \"%%1\"" /f 2>$null
+        /ve /t REG_SZ /d '"X:\Tools\java\bin\javaw.exe" -jar "%1"' /f *>$null
 
     # JavaSoft / Oracle compatibility keys — required by many Java apps that query
     # HKLM\SOFTWARE\JavaSoft at runtime to locate the JRE (PhoenixPE approach)
@@ -551,13 +508,13 @@ function Invoke-WinRECustomization {
 
     # Register Chrome for http/https/html (like PhoenixPE)
     reg add "HKLM\WinRE_SW\Classes\http\shell\open\command" `
-        /ve /t REG_SZ /d "\"X:\Tools\chrome\chrome.exe\" \"%1\"" /f 2>$null
+        /ve /t REG_SZ /d '"X:\Tools\chrome\chrome.exe" "%1"' /f *>$null
     reg add "HKLM\WinRE_SW\Classes\https\shell\open\command" `
-        /ve /t REG_SZ /d "\"X:\Tools\chrome\chrome.exe\" \"%1\"" /f 2>$null
+        /ve /t REG_SZ /d '"X:\Tools\chrome\chrome.exe" "%1"' /f *>$null
     reg add "HKLM\WinRE_SW\Classes\.html" /ve /t REG_SZ /d "ChromeHTML" /f 2>$null
     reg add "HKLM\WinRE_SW\Classes\.htm" /ve /t REG_SZ /d "ChromeHTML" /f 2>$null
     reg add "HKLM\WinRE_SW\Classes\ChromeHTML\shell\open\command" `
-        /ve /t REG_SZ /d "\"X:\Tools\chrome\chrome.exe\" \"%1\"" /f 2>$null
+        /ve /t REG_SZ /d '"X:\Tools\chrome\chrome.exe" "%1"' /f *>$null
 
     # Chrome master_preferences to disable first-run wizard (PhoenixPE approach)
     $chromeMasterPrefs = @'
@@ -830,7 +787,7 @@ function Invoke-DriverInjection {
     Write-Status "Source: $DriversPath" -Type Info
 
     try {
-        $result = Add-WindowsDriver -Path $Mount -Driver $DriversPath -Recurse -Verbose -ErrorAction Stop
+        $result = Add-WindowsDriver -Path $Mount -Driver $DriversPath -Recurse -ErrorAction Stop
         $injected = @($result).Count
         Write-Status "Driver injection complete — $injected driver package(s) added to image" -Type Success
     }
@@ -858,10 +815,12 @@ function Invoke-WinRECommit {
 
     # Safety: ensure registry hives are unloaded before dismount.
     # These are no-ops if Invoke-WinRECustomization already unloaded them correctly.
-    reg unload "HKLM\WinRE_SW"  2>$null
-    reg unload "HKLM\WinRE_SYS" 2>$null
+    # Note: reg.exe writes its "ERROR:" messages to STDOUT (not stderr), so *>$null
+    # is required to suppress both streams; 2>$null alone would leave errors visible.
+    reg unload "HKLM\WinRE_SW"  *>$null
+    reg unload "HKLM\WinRE_SYS" *>$null
 
-    Dismount-WindowsImage -Path $Mount -Save -Verbose
+    Dismount-WindowsImage -Path $Mount -Save
     Write-Status "WinRE image committed" -Type Success
 
     # Clean mount directory
@@ -876,7 +835,7 @@ function Invoke-ISOBuild {
 
     Import-Module OSD -Force
 
-    New-OSDCloudISO -WorkspacePath $Workspace -Verbose
+    New-OSDCloudISO -WorkspacePath $Workspace
 
     $isoPath = Get-ChildItem "$Workspace\*.iso" -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($isoPath) {
@@ -894,29 +853,10 @@ function Invoke-ISOBuild {
 function Invoke-Main {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # -------------------------------------------------------
-    # Logging: create log directory + start transcript
-    # -------------------------------------------------------
-    $logsDir  = Join-Path $Workspace "Logs"
-    if (-not (Test-Path $logsDir)) { New-Item $logsDir -ItemType Directory -Force | Out-Null }
-
-    $logTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $logFile = Join-Path $logsDir "Build-${Mode}-${logTimestamp}.log"
-
-    # Verbose output (from OSD/DISM cmdlets and Write-Verbose calls) captured in transcript
-    $oldVerbose = $VerbosePreference
-    $VerbosePreference = 'Continue'
-
-    Start-Transcript -Path $logFile -Append -NoClobber | Out-Null
-    Write-Host "[LOG] Transcript started: $logFile"
-
-    try {
-
     Write-Host ""
     Write-Status "=== OSDCloud Clean WinRE Builder v$($config.Version) ===" -Type Info
     Write-Status "Mode: $Mode | Build: $($config.BuildDate)" -Type Info
     Write-Status "All downloads are PORTABLE — no MSI, no installers" -Type Info
-    Write-Status "Log file: $logFile" -Type Info
     Write-Host ""
 
     # Step 0: Initialize
@@ -974,18 +914,6 @@ function Invoke-Main {
     }
 
     Write-Host ""
-
-    } # end try
-    catch {
-        Write-Status "FATAL: $_" -Type Error
-        Write-Host $_.ScriptStackTrace
-        throw
-    }
-    finally {
-        $VerbosePreference = $oldVerbose
-        try { Stop-Transcript | Out-Null } catch {}
-        Write-Host "[LOG] Build log saved to: $logFile"
-    }
 }
 
 # Execute
