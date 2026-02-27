@@ -16,4 +16,3 @@ Edit-OSDCloudWinPE -StartOSDCloud "-OSName 'Windows 11 24H2 x64' -OSLanguage en-
 #-Wallpaper $PATH_Wallpaper `
 #-CloudDriver * `
 #-StartURL $PATH_URL 
--Verbose
