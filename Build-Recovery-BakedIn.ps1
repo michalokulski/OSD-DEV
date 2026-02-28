@@ -17,7 +17,7 @@ param(
 
     # --- WinPE hardware support ---
     [string[]] $CloudDriver   = @('*'),
-    [switch]   $WirelessConnect,
+    [switch]   $WirelessConnect ,
 
     # --- Optional extras ---
     [string]   $DriversPath   = "$PSScriptRoot\Drivers",
@@ -30,7 +30,7 @@ param(
     # To find a new URL: download latest ChromeSetup.exe from
     #   https://dl.google.com/tag/s/appguid={...}/update2/installers/ChromeSetup.exe
     # and inspect the download URL from dl.google.com/release2/chrome/
-    [string]   $ChromeUrl     = "https://dl.google.com/release2/chrome/AOs_2025Q1/131.0.6778.204/131.0.6778.204_chrome_installer_uncompressed.exe",
+    [string]   $ChromeUrl     = "https://github.com/Bush2021/chrome_installer/releases/download/145.0.7632.117/x64_145.0.7632.117_chrome_installer_uncompressed.exe",
 
     # 7-Zip installer SFX - 7zr.exe can extract it
     [string]   $SevenZipUrl   = "https://www.7-zip.org/a/7z2409-x64.exe",
@@ -38,7 +38,7 @@ param(
 
     # IBM Semeru JRE 8 LTS (OpenJ9) - check latest at:
     # https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases
-    [string]   $JavaUrl       = "https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases/download/jdk8u422-b05/ibm-semeru-open-jre_x64_windows_8.0.422.5_openj9-0.46.0.zip"
+    [string]   $JavaUrl       = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u482-b08.1_openj9-0.57.0/ibm-semeru-open-jre_x86-32_windows_8.0.482.1.zip"
 )
 
 #Requires -RunAsAdministrator

@@ -21,7 +21,6 @@ A complete, production-ready Windows PE/WinRE distribution based on OSD (OSDeplo
 ```
 OSD-DEV/
 ├── Build-OSDCloud-Clean.ps1          (Main build script)
-├── Optimize-WinRE.ps1                (Size optimization)
 ├── Quick-Launch.ps1                  (Interactive menu)
 ├── Verify-Environment.ps1            (Pre-flight check)
 ├── Drivers/                          (Optional .inf driver injection)
@@ -87,34 +86,12 @@ and downloads Chrome, 7-Zip and Java into `X:\RecoveryTools\` on the RAM disk.
 .\Build-Recovery-OnDemand.ps1
 ```
 
-### 4. **Optimize-WinRE.ps1**
-
-WIM size optimization utility:
-- `CleanupTemp` — Remove temp files, logs, caches from mounted WIM
-- `CompressWIM` — Recompress boot.wim with maximum DISM compression
-- `RemoveBlob` — Remove unused system components
-- `OptimizeAll` — Run all of the above in sequence
-- `Analyze` — Mount WIM and show size breakdown by component
-
 **Parameters:**
 ```powershell
 -Operation : CleanupTemp | CompressWIM | RemoveBlob | OptimizeAll | Analyze (default: OptimizeAll)
 -Workspace : Path to workspace (default: C:\OSDCloud\WinRE)
 -Mount     : WIM mount point (default: C:\Mount)
 ```
-
-**Usage:**
-```powershell
-# Run full optimization
-.\Optimize-WinRE.ps1 -Operation OptimizeAll
-
-# Just analyze current size
-.\Optimize-WinRE.ps1 -Operation Analyze
-
-# Cleanup temporary files only
-.\Optimize-WinRE.ps1 -Operation CleanupTemp
-```
-
 ## Quick Start Guide
 
 ### Prerequisites
@@ -140,11 +117,6 @@ WIM size optimization utility:
 - ✓ Customizes WinPE with OSD built-ins (7za, WiFi, cloud drivers)
 - ✓ Generates ISO file (~300-400 MB)
 - ⏱ Total time: 5-15 minutes (no app downloads)
-
-### Step 3: (Optional) Optimize Size
-```powershell
-.\Optimize-WinRE.ps1 -Operation OptimizeAll
-```
 
 Typical size reduction: **20-30%**
 
@@ -269,11 +241,6 @@ Dismount-WindowsImage -Path "C:\Mount" -Discard
 [System.GC]::Collect()
 Get-Process | Where-Object {$_.Name -like '*dism*'} | Stop-Process -Force
 ```
-
-### Out of Disk Space
-1. Run Optimize-WinRE.ps1
-2. Clean download cache: `Remove-Item C:\BuildPayload\downloads -Recurse`
-3. Use different workspace: `.\Build-OSDCloud-Clean.ps1 -Workspace "D:\OSD"`
 
 ## Performance Tuning
 

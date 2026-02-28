@@ -79,7 +79,7 @@ $scripts = @{
     'Build-OSDCloud-Clean.ps1'     = 'Deploy ISO build'
     'Build-Recovery-BakedIn.ps1'   = 'Recovery ISO -- tools baked in'
     'Build-Recovery-OnDemand.ps1'  = 'Recovery ISO -- on-demand tools'
-    'Optimize-WinRE.ps1'           = 'WIM optimization'
+    #'Optimize-WinRE.ps1'           = 'WIM optimization'
     'Quick-Launch.ps1'             = 'Interactive launcher'
 }
 

@@ -35,7 +35,6 @@ function Show-Menu {
     Write-Host " 5) Recovery ISO -- On-Demand  (lighter WIM, tools download at boot)"
     Write-Host ""
     Write-Host " -- Maintenance --" -ForegroundColor DarkGray
-    Write-Host " 6) Optimize WIM Size"
     Write-Host " 7) Analyze WIM Content"
     Write-Host " 8) Open Workspace Folder"
     Write-Host " 9) Verify Environment  (pre-flight checks)"
@@ -159,14 +158,14 @@ function Invoke-Menu {
             }
             '6' {
                 Write-Status "Starting WIM optimization (may take several minutes)..." -Type Warning
-                & "$PSScriptRoot\Optimize-WinRE.ps1" -Operation OptimizeAll -Workspace $Workspace
+                #& "$PSScriptRoot\Optimize-WinRE.ps1" -Operation OptimizeAll -Workspace $Workspace
                 Write-Status "Optimization complete!" -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
             '7' {
                 Write-Status "Analyzing WIM content..." -Type Success
-                & "$PSScriptRoot\Optimize-WinRE.ps1" -Operation Analyze -Workspace $Workspace
+                #& "$PSScriptRoot\Optimize-WinRE.ps1" -Operation Analyze -Workspace $Workspace
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
@@ -218,7 +217,7 @@ try {
         "$PSScriptRoot\Build-OSDCloud-Clean.ps1",
         "$PSScriptRoot\Build-Recovery-BakedIn.ps1",
         "$PSScriptRoot\Build-Recovery-OnDemand.ps1",
-        "$PSScriptRoot\Optimize-WinRE.ps1",
+        #"$PSScriptRoot\Optimize-WinRE.ps1",
         "$PSScriptRoot\Verify-Environment.ps1"
     )
     
