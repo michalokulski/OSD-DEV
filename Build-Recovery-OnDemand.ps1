@@ -30,11 +30,11 @@ param(
 
     # --- Download URLs embedded into the runtime WinPE script ---
     # Chrome: uncompressed installer
-    [string]   $ChromeUrl     = "https://dl.google.com/release2/chrome/AOs_2025Q1/131.0.6778.204/131.0.6778.204_chrome_installer_uncompressed.exe",
+    [string]   $ChromeUrl     = "https://github.com/Bush2021/chrome_installer/releases/download/145.0.7632.117/x64_145.0.7632.117_chrome_installer_uncompressed.exe",
     # 7-Zip installer SFX
     [string]   $SevenZipUrl   = "https://www.7-zip.org/a/7z2409-x64.exe",
     # IBM Semeru JRE 8 LTS (OpenJ9)
-    [string]   $JavaUrl       = "https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases/download/jdk8u422-b05/ibm-semeru-open-jre_x64_windows_8.0.422.5_openj9-0.46.0.zip"
+    [string]   $JavaUrl       = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u482-b08.1_openj9-0.57.0/ibm-semeru-open-jre_x64_windows_8.0.482.1.zip"
 )
 
 #Requires -RunAsAdministrator
@@ -148,8 +148,8 @@ h1   { font-size:22px; color:#90caf9; margin-bottom:6px; letter-spacing:1px; }
     <span class="btn-desc">Automated OS Deployment<br>Windows 11 24H2 Enterprise</span>
   </button>
   <button class="btn recovery" onclick="LaunchRecovery()">
-    <span class="btn-title">Windows Recovery OS</span>
-    <span class="btn-desc">Desktop + Chrome, 7-Zip,<br>Java Semeru 8 LTS</span>
+    <span class="btn-title">Recovery Dashboard</span>
+    <span class="btn-desc">Chrome, 7-Zip, Java Semeru 8<br>PowerShell, CMD, Tools</span>
   </button>
 </div>
 <script language="JScript">
@@ -197,9 +197,7 @@ if (`$ram -lt 4) {
 }
 
 `$toolsBase = "X:\RecoveryTools"
-`$desktop   = "`$env:SystemDrive\Users\Public\Desktop"
 New-Item `$toolsBase -ItemType Directory -Force | Out-Null
-New-Item `$desktop   -ItemType Directory -Force | Out-Null
 
 # ---- Download helper ----------------------------------------------
 function Invoke-PEDownload {
@@ -213,30 +211,6 @@ function Invoke-PEDownload {
         Write-Host "[OK]   `$Label (`$mb MB)"
     } catch {
         Write-Host "[ERR]  `$Label failed: `$_"
-    }
-}
-
-# ---- Shortcut helper (WScript.Shell .lnk, .cmd fallback) ----------
-function New-PEShortcut {
-    param(
-        [string]`$Name,
-        [string]`$Target,
-        [string]`$Arguments  = "",
-        [string]`$WorkingDir = ""
-    )
-    try {
-        `$wsh = New-Object -ComObject WScript.Shell
-        `$lnk = `$wsh.CreateShortcut("`$desktop\`$Name.lnk")
-        `$lnk.TargetPath = `$Target
-        if (`$Arguments)  { `$lnk.Arguments       = `$Arguments  }
-        if (`$WorkingDir) { `$lnk.WorkingDirectory = `$WorkingDir }
-        `$lnk.Save()
-        [Runtime.InteropServices.Marshal]::ReleaseComObject(`$wsh) | Out-Null
-        Write-Host "[OK]   Shortcut: `$Name"
-    } catch {
-        "@echo off``r``nstart ```"```" ```"`$Target```" `$Arguments" |
-            Set-Content "`$desktop\`$Name.cmd" -Encoding ASCII
-        Write-Host "[WARN] Shortcut fallback (.cmd): `$Name"
     }
 }
 
@@ -325,33 +299,10 @@ if (Test-Path `$javaZip) {
 }
 
 # =================================================================
-# Desktop shortcuts
+# Set environment variables and launch Recovery Dashboard
 # =================================================================
 Write-Host ""
-Write-Host "=== Creating Desktop Shortcuts ===" -ForegroundColor Cyan
-
-New-PEShortcut `
-    -Name       "Chrome Browser" `
-    -Target     "`$toolsBase\chrome\chrome.exe" `
-    -Arguments  "--no-first-run --no-default-browser-check --disable-sync --disable-gpu --user-data-dir=`"`$toolsBase\chrome\profile`"" `
-    -WorkingDir "`$toolsBase\chrome"
-
-New-PEShortcut `
-    -Name       "7-Zip" `
-    -Target     "`$toolsBase\7zip\7zFM.exe" `
-    -WorkingDir "`$toolsBase\7zip"
-
-New-PEShortcut `
-    -Name       "Java Prompt (Semeru 8)" `
-    -Target     "X:\Windows\System32\cmd.exe" `
-    -Arguments  "/k `"set JAVA_HOME=`$toolsBase\java&& set PATH=%JAVA_HOME%\bin;%PATH%&& java -version`"" `
-    -WorkingDir "`$toolsBase\java\bin"
-
-New-PEShortcut `
-    -Name       "LIBR - OSD Deploy" `
-    -Target     "X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
-    -Arguments  "-NoLogo -NoExit -Command `"Import-Module OSD -Force; Start-OSDCloudGUI`"" `
-    -WorkingDir "X:\Windows\System32"
+Write-Host "=== Configuring Environment ===" -ForegroundColor Cyan
 
 # Expose Java + tools on PATH for any child processes
 [Environment]::SetEnvironmentVariable("JAVA_HOME", "`$toolsBase\java", "Machine")
@@ -360,13 +311,180 @@ New-PEShortcut `
     "`$toolsBase\java\bin;`$toolsBase\chrome;`$toolsBase\7zip;`$env:PATH",
     "Machine"
 )
+Write-Host "[OK]   JAVA_HOME and PATH configured"
 
-Write-Host ""
-Write-Host "[OK]   Desktop ready -- launching Explorer..." -ForegroundColor Green
-Start-Process "explorer.exe"
+# Launch the Recovery Dashboard
+Write-Host "[OK]   Launching Recovery Dashboard..." -ForegroundColor Green
+Start-Process "mshta.exe" -ArgumentList "`"`"X:\OSDCloud\Config\Scripts\Recovery-Dashboard.hta`"`""
 "@
     Set-Content "$scriptsDir\Start-RecoveryMode-OnDemand.ps1" -Value $onDemandPs1 -Encoding UTF8
     Write-Status "Start-RecoveryMode-OnDemand.ps1 written" -Type Success
+
+    # ---- Recovery-Dashboard.hta ---------------------------------------------
+    # Persistent launcher HTA — serves as the "desktop" in WinPE.
+    # Double-quoted here-string: $osdArgs is expanded at BUILD TIME.
+    $toolsPath = "X:\RecoveryTools"
+    $dashboardHta = @"
+<html>
+<head>
+<title>Recovery Dashboard</title>
+<HTA:APPLICATION BORDER="thin" BORDERSTYLE="normal" CAPTION="yes"
+    MAXIMIZEBUTTON="yes" MINIMIZEBUTTON="yes" SYSMENU="yes"
+    SCROLL="no" SINGLEINSTANCE="yes" ICON=""/>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 20px 16px;
+}
+h1 { font-size:22px; color:#90caf9; margin-bottom:4px; letter-spacing:1px; }
+.sub { font-size:11px; color:#555; margin-bottom:28px; }
+.grid {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    justify-content: center; max-width: 880px;
+}
+.card {
+    width: 200px; height: 120px; border: none; border-radius: 10px;
+    cursor: pointer; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 6px;
+    transition: opacity 0.15s;
+}
+.card:hover { opacity: 0.88; }
+.card:active { opacity: 0.75; }
+.card-icon { font-size: 28px; }
+.card-title { font-size: 14px; font-weight: 700; }
+.card-desc { font-size: 10px; opacity: 0.7; text-align: center; padding: 0 8px; }
+
+.c-blue    { background: #1565c0; color: #fff; }
+.c-green   { background: #2e7d32; color: #fff; }
+.c-orange  { background: #e65100; color: #fff; }
+.c-purple  { background: #6a1b9a; color: #fff; }
+.c-teal    { background: #00695c; color: #fff; }
+.c-grey    { background: #37474f; color: #fff; }
+.c-red     { background: #b71c1c; color: #fff; }
+.c-indigo  { background: #283593; color: #fff; }
+
+.status {
+    margin-top: auto; padding-top: 16px;
+    font-size: 11px; color: #555; text-align: center;
+}
+</style>
+</head>
+<body>
+<h1>RECOVERY DASHBOARD</h1>
+<p class="sub">Launch tools from this panel. This window stays open.</p>
+<div class="grid">
+  <button class="card c-blue" onclick="LaunchChrome()">
+    <span class="card-icon">&#127760;</span>
+    <span class="card-title">Chrome</span>
+    <span class="card-desc">Web Browser</span>
+  </button>
+  <button class="card c-green" onclick="Launch7Zip()">
+    <span class="card-icon">&#128451;</span>
+    <span class="card-title">7-Zip</span>
+    <span class="card-desc">File Manager</span>
+  </button>
+  <button class="card c-orange" onclick="LaunchJava()">
+    <span class="card-icon">&#9749;</span>
+    <span class="card-title">Java Prompt</span>
+    <span class="card-desc">Semeru 8 + JAVA_HOME</span>
+  </button>
+  <button class="card c-purple" onclick="LaunchPowerShell()">
+    <span class="card-icon">&#9889;</span>
+    <span class="card-title">PowerShell</span>
+    <span class="card-desc">Windows PowerShell</span>
+  </button>
+  <button class="card c-teal" onclick="LaunchCmd()">
+    <span class="card-icon">&#128421;</span>
+    <span class="card-title">Command Prompt</span>
+    <span class="card-desc">cmd.exe</span>
+  </button>
+  <button class="card c-grey" onclick="LaunchNotepad()">
+    <span class="card-icon">&#128196;</span>
+    <span class="card-title">Notepad</span>
+    <span class="card-desc">Text Editor</span>
+  </button>
+  <button class="card c-red" onclick="LaunchDiskpart()">
+    <span class="card-icon">&#128439;</span>
+    <span class="card-title">Disk Management</span>
+    <span class="card-desc">diskpart</span>
+  </button>
+  <button class="card c-indigo" onclick="LaunchLIBR()">
+    <span class="card-icon">&#128187;</span>
+    <span class="card-title">LIBR Deploy</span>
+    <span class="card-desc">OSD Cloud GUI</span>
+  </button>
+</div>
+<div class="status" id="statusBar">Loading system info...</div>
+<script language="JScript">
+var TOOLS = "$toolsPath";
+var sh = new ActiveXObject("WScript.Shell");
+
+window.onload = function() {
+    var w = 900, h = 580;
+    self.resizeTo(w, h);
+    self.moveTo(Math.round((screen.width  - w) / 2),
+                Math.round((screen.height - h) / 2));
+    try {
+        var wmi = GetObject("winmgmts:\\\\.\\root\\cimv2");
+        var cs = wmi.ExecQuery("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem");
+        var ram = "";
+        var e = new Enumerator(cs);
+        if (!e.atEnd()) { ram = (e.item().TotalPhysicalMemory / 1073741824).toFixed(1); }
+        var os = wmi.ExecQuery("SELECT Caption FROM Win32_OperatingSystem");
+        var osName = "";
+        var e2 = new Enumerator(os);
+        if (!e2.atEnd()) { osName = e2.item().Caption; }
+        var net = wmi.ExecQuery("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = True");
+        var ip = "No network";
+        var e3 = new Enumerator(net);
+        if (!e3.atEnd()) {
+            var addrs = e3.item().IPAddress;
+            if (addrs) { ip = addrs(0); }
+        }
+        document.getElementById("statusBar").innerHTML =
+            osName + " &nbsp;|&nbsp; RAM: " + ram + " GB &nbsp;|&nbsp; IP: " + ip;
+    } catch(ex) {
+        document.getElementById("statusBar").innerHTML = "System info unavailable";
+    }
+};
+
+function LaunchChrome() {
+    sh.Run('"' + TOOLS + '\\chrome\\chrome.exe" --no-first-run --no-default-browser-check --disable-sync --disable-gpu --user-data-dir="' + TOOLS + '\\chrome\\profile"', 1, false);
+}
+function Launch7Zip() {
+    sh.Run('"' + TOOLS + '\\7zip\\7zFM.exe"', 1, false);
+}
+function LaunchJava() {
+    sh.Run('cmd.exe /k "set JAVA_HOME=' + TOOLS + '\\java&& set PATH=%JAVA_HOME%\\bin;%PATH%&& java -version"', 1, false);
+}
+function LaunchPowerShell() {
+    sh.Run("powershell.exe", 1, false);
+}
+function LaunchCmd() {
+    sh.Run("cmd.exe", 1, false);
+}
+function LaunchNotepad() {
+    sh.Run("notepad.exe", 1, false);
+}
+function LaunchDiskpart() {
+    sh.Run('cmd.exe /k diskpart', 1, false);
+}
+function LaunchLIBR() {
+    sh.Run('PowerShell -NoLogo -NoExit -Command "Import-Module OSD -Force; Start-OSDCloudGUI"', 1, false);
+}
+</script>
+</body>
+</html>
+"@
+    Set-Content "$scriptsDir\Recovery-Dashboard.hta" -Value $dashboardHta -Encoding UTF8
+    Write-Status "Recovery-Dashboard.hta written" -Type Success
 }
 
 # =================================================================

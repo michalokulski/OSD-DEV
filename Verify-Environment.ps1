@@ -103,7 +103,7 @@ Write-Host ""
 # ====================================
 Write-Host "[3/8] Documentation" -ForegroundColor Cyan
 
-$docs = @('README.md', 'QUICKSTART.md', 'PROJECT-SUMMARY.md', 'START-HERE.md')
+$docs = @('README.md')
 $missingDocs = @()
 foreach ($docName in $docs) {
     $docPath = Join-Path $scriptDir $docName

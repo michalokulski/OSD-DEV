@@ -21,7 +21,7 @@ function Write-Status {
 
 function Show-Menu {
     Write-Status "================================================" -Type Header
-    Write-Status "   OSDCloud WinRE Builder v3.0 - Launcher" -Type Header
+    Write-Status "   OSDCloud WinRE Builder v3.1 - Launcher" -Type Header
     Write-Status "   Workspace: $Workspace" -Type Header
     Write-Status "================================================" -Type Header
     Write-Host ""
@@ -31,13 +31,13 @@ function Show-Menu {
     Write-Host " 3) Build ISO Only  (from existing WinRE)"
     Write-Host ""
     Write-Host " -- Recovery ISO (HTA boot menu: LIBR + Desktop tools) --" -ForegroundColor DarkGray
-    Write-Host " 4) Recovery ISO -- Baked-In  (tools in WIM, ~350 MB larger)"
+    Write-Host " 4) Recovery ISO -- Baked-In  (tools in WIM + optional GUI pack media auto-acquire)"
     Write-Host " 5) Recovery ISO -- On-Demand  (lighter WIM, tools download at boot)"
     Write-Host ""
     Write-Host " -- Maintenance --" -ForegroundColor DarkGray
-    Write-Host " 7) Analyze WIM Content"
-    Write-Host " 8) Open Workspace Folder"
-    Write-Host " 9) Verify Environment  (pre-flight checks)"
+    Write-Host " 6) Analyze WIM Content"
+    Write-Host " 7) Open Workspace Folder"
+    Write-Host " 8) Verify Environment  (pre-flight checks)"
     Write-Host ""
     Write-Host " C) Clean Build Artifacts  (prepare for fresh run)" -ForegroundColor Yellow
     Write-Host " 0) Exit"
@@ -115,7 +115,7 @@ function Invoke-CleanEnvironment {
 function Invoke-Menu {
     do {
         Show-Menu
-        Write-Host -NoNewline " Select [0-9, C]: "
+        Write-Host -NoNewline " Select [0-8, C]: "
         $choice = (Read-Host).Trim()
         
         switch ($choice) {
@@ -143,7 +143,36 @@ function Invoke-Menu {
             '4' {
                 Write-Status "Building Recovery ISO (Baked-In tools)..." -Type Success
                 Write-Status "Downloads Chrome, 7-Zip and IBM Semeru JRE 8 into the WIM -- allow 20+ min" -Type Warning
-                & "$PSScriptRoot\Build-Recovery-BakedIn.ps1" -Workspace $Workspace
+
+                Write-Host ""
+                Write-Host " Optional: Build GUI shell compatibility pack from install media" -ForegroundColor DarkGray
+                Write-Host -NoNewline " Enable compatibility pack build? [Y/N] (default N): "
+                $enablePack = (Read-Host).Trim().ToUpper()
+
+                if ($enablePack -eq 'Y') {
+                    Write-Host -NoNewline " Install media path (.wim/.esd/.iso/folder) [blank = auto]: "
+                    $installMediaPath = (Read-Host).Trim()
+
+                    Write-Host -NoNewline " Install image index [default 1]: "
+                    $indexInput = (Read-Host).Trim()
+                    $installIndex = 1
+                    if ($indexInput -match '^\d+$' -and [int]$indexInput -gt 0) {
+                        $installIndex = [int]$indexInput
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($installMediaPath)) {
+                        Write-Status "No media path provided; auto-acquire will try workspace media candidates." -Type Info
+                        & "$PSScriptRoot\Build-Recovery-BakedIn.ps1" -Workspace $Workspace -BuildGuiShellPack -InstallWimIndex $installIndex
+                    }
+                    else {
+                        Write-Status "Using install media path: $installMediaPath" -Type Info
+                        & "$PSScriptRoot\Build-Recovery-BakedIn.ps1" -Workspace $Workspace -BuildGuiShellPack -InstallMediaPath $installMediaPath -InstallWimIndex $installIndex
+                    }
+                }
+                else {
+                    & "$PSScriptRoot\Build-Recovery-BakedIn.ps1" -Workspace $Workspace
+                }
+
                 Write-Status "Recovery (Baked-In) ISO complete!" -Type Success
                 Read-Host "Press Enter to continue"
                 Clear-Host
@@ -157,19 +186,23 @@ function Invoke-Menu {
                 Clear-Host
             }
             '6' {
-                Write-Status "Starting WIM optimization (may take several minutes)..." -Type Warning
-                #& "$PSScriptRoot\Optimize-WinRE.ps1" -Operation OptimizeAll -Workspace $Workspace
-                Write-Status "Optimization complete!" -Type Success
+                Write-Status "Analyzing WIM content..." -Type Info
+                $wim = "$Workspace\Media\sources\boot.wim"
+                if (Test-Path $wim) {
+                    $wimInfo = Get-WindowsImage -ImagePath $wim -Index 1
+                    Write-Status "WIM: $wim" -Type Info
+                    Write-Status "Size: $([math]::Round((Get-Item $wim).Length / 1MB, 1)) MB" -Type Info
+                    Write-Status "Name: $($wimInfo.ImageName)" -Type Info
+                    Write-Status "Description: $($wimInfo.ImageDescription)" -Type Info
+                    Write-Status "Architecture: $($wimInfo.Architecture)" -Type Info
+                    Write-Status "Languages: $($wimInfo.Languages -join ', ')" -Type Info
+                } else {
+                    Write-Status "boot.wim not found at $wim -- build first." -Type Warning
+                }
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
             '7' {
-                Write-Status "Analyzing WIM content..." -Type Success
-                #& "$PSScriptRoot\Optimize-WinRE.ps1" -Operation Analyze -Workspace $Workspace
-                Read-Host "Press Enter to continue"
-                Clear-Host
-            }
-            '8' {
                 Write-Status "Opening workspace: $Workspace" -Type Info
                 if (Test-Path $Workspace) {
                     # Show ISO/WIM status before opening
@@ -185,7 +218,7 @@ function Invoke-Menu {
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
-            '9' {
+            '8' {
                 Clear-Host
                 Write-Status "Running environment verification..." -Type Info
                 & "$PSScriptRoot\Verify-Environment.ps1"
@@ -200,7 +233,7 @@ function Invoke-Menu {
                 exit 0
             }
             default {
-                Write-Status "Invalid option. Please select 0-9 or C." -Type Warning
+                Write-Status "Invalid option. Please select 0-8 or C." -Type Warning
                 Read-Host "Press Enter to continue"
                 Clear-Host
             }
@@ -217,7 +250,6 @@ try {
         "$PSScriptRoot\Build-OSDCloud-Clean.ps1",
         "$PSScriptRoot\Build-Recovery-BakedIn.ps1",
         "$PSScriptRoot\Build-Recovery-OnDemand.ps1",
-        #"$PSScriptRoot\Optimize-WinRE.ps1",
         "$PSScriptRoot\Verify-Environment.ps1"
     )
     

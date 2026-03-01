@@ -1,7 +1,7 @@
 # OSDCloud Clean WinRE LiveBoot - Complete Guide
 
 **Version:** 3.0.0  
-**Date:** February 2026  
+**Date:** March 2026  
 **Status:** Production Ready
 
 ## Overview
@@ -11,6 +11,10 @@ A complete, production-ready Windows PE/WinRE distribution based on OSD (OSDeplo
 - ✅ **Deploy ISO** (`Build-OSDCloud-Clean.ps1`) — ZTI/GUI LIBR deployment, minimal footprint
 - ✅ **Recovery ISO** (`Build-Recovery-BakedIn.ps1`) — HTA boot menu: LIBR deploy OR full desktop (Chrome, 7-Zip, Java Semeru 8 baked in)
 - ✅ **Recovery ISO** (`Build-Recovery-OnDemand.ps1`) — same HTA menu but lighter WIM; tools download at boot
+- ✅ Optional GUI shell compatibility pack from Windows install media (`install.wim/.esd/.iso/folder`) with auto-acquire + ESD→WIM export
+- ✅ Boot-time compatibility wiring for Chrome + Java (App Paths, associations, JavaSoft compatibility keys)
+- ✅ Optional AIM RAM disk staging and boot initialization with non-blocking fallback
+- ✅ Boot-time dependency logging (`X:\OSDCloud\Logs\DependencyCheck.log`) in non-blocking mode
 - ✅ No Scoop dependencies — direct portable downloads only
 - ✅ Driver injection support (`Drivers\` folder + `-DriversPath` parameter)
 - ✅ Custom wallpaper support (`-WallpaperPath` parameter)
@@ -20,11 +24,12 @@ A complete, production-ready Windows PE/WinRE distribution based on OSD (OSDeplo
 
 ```
 OSD-DEV/
-├── Build-OSDCloud-Clean.ps1          (Main build script)
+├── Build-OSDCloud-Clean.ps1          (Deploy ISO builder)
+├── Build-Recovery-BakedIn.ps1        (Recovery ISO — tools in WIM)
+├── Build-Recovery-OnDemand.ps1       (Recovery ISO — tools download at boot)
+├── Build-Image-OldWay.ps1            (Legacy build approach)
 ├── Quick-Launch.ps1                  (Interactive menu)
 ├── Verify-Environment.ps1            (Pre-flight check)
-├── Drivers/                          (Optional .inf driver injection)
-│   └── README.md
 └── README.md                         (This file)
 
 C:\OSDCloud\WinRE\                   (Generated output)
@@ -68,12 +73,38 @@ Deploy-only ISO builder. Uses native OSD cmdlets exclusively — no manual WIM m
 ### 2. **Build-Recovery-BakedIn.ps1**
 Recovery ISO builder. Downloads Chrome, 7-Zip and IBM Semeru JRE 8 to `$Workspace\Config\Tools\`  
 during build. OSD's `Edit-OSDCloudWinPE` Robocopy-mirrors `Config\` into the WIM automatically.  
-At boot: HTA menu offers LIBR ZTI deploy or a full Recovery Desktop (explorer.exe + shortcuts).
+At boot: HTA menu offers LIBR ZTI deploy or a full Recovery Desktop (explorer.exe + shortcuts).  
+When `-BuildGuiShellPack` is used, the script can source install media from `-InstallWimPath` or auto-resolve from `-InstallMediaPath` (or workspace media), including automatic `.esd` export to `.wim`.
 
 ```powershell
 .\Build-Recovery-BakedIn.ps1
 .\Build-Recovery-BakedIn.ps1 -StagingPath D:\Downloads  # custom download cache
+
+# Build GUI shell compatibility pack from a local install.wim
+.\Build-Recovery-BakedIn.ps1 -BuildGuiShellPack -InstallWimPath "D:\sources\install.wim" -InstallWimIndex 6
+
+# Auto-acquire from install.esd (exports selected index to WIM automatically)
+.\Build-Recovery-BakedIn.ps1 -BuildGuiShellPack -InstallMediaPath "D:\sources\install.esd" -InstallWimIndex 6
+
+# Auto-acquire from Windows ISO (mounts ISO, locates install.wim/esd, exports if needed)
+.\Build-Recovery-BakedIn.ps1 -BuildGuiShellPack -InstallMediaPath "D:\ISO\Win11_24H2_English_x64.iso" -InstallWimIndex 6
+
+# Enable pack build with no explicit path (auto-tries workspace media candidates)
+.\Build-Recovery-BakedIn.ps1 -BuildGuiShellPack -InstallWimIndex 6
 ```
+
+**GUI shell pack source parameters:**
+```powershell
+-BuildGuiShellPack      : Enables compatibility pack creation from Windows install media
+-InstallWimPath         : Direct path to install.wim (preferred if already available)
+-InstallMediaPath       : Optional path to .wim, .esd, .iso, or media folder
+-AutoAcquireInstallWim  : Auto-resolve/export WIM from media candidates (default: enabled)
+-InstallWimIndex        : Source image index used for mounting/export
+```
+
+**Quick-Launch integration:**
+- Menu option `4` now prompts for optional GUI shell pack build.
+- You can provide install media path interactively or leave blank for auto-acquire.
 
 ### 3. **Build-Recovery-OnDemand.ps1**
 Same HTA boot menu as BakedIn, but the WIM carries no pre-staged tools.  
@@ -88,9 +119,19 @@ and downloads Chrome, 7-Zip and Java into `X:\RecoveryTools\` on the RAM disk.
 
 **Parameters:**
 ```powershell
--Operation : CleanupTemp | CompressWIM | RemoveBlob | OptimizeAll | Analyze (default: OptimizeAll)
--Workspace : Path to workspace (default: C:\OSDCloud\WinRE)
--Mount     : WIM mount point (default: C:\Mount)
+-Workspace       : Output path (default: C:\OSDCloud\WinRE)
+-OSName          : e.g. 'Windows 11 24H2 x64'
+-OSLanguage      : e.g. en-us
+-OSEdition       : e.g. Enterprise
+-OSActivation    : Volume | Retail
+-CloudDriver     : Driver pack array (default: @('*'))
+-WirelessConnect : Include WiFi init in startnet.cmd
+-DriversPath     : Path to extra .inf drivers (default: .\Drivers)
+-WallpaperPath   : Custom .jpg wallpaper for WinPE desktop
+-ForceTemplate   : Rebuild OSDCloud Template even if it exists
+-ChromeUrl       : Override Chrome download URL
+-SevenZipUrl     : Override 7-Zip download URL
+-JavaUrl         : Override Java download URL
 ```
 ## Quick Start Guide
 
@@ -120,6 +161,20 @@ and downloads Chrome, 7-Zip and Java into `X:\RecoveryTools\` on the RAM disk.
 
 Typical size reduction: **20-30%**
 
+### Step 3: Build Recovery ISO (optional)
+```powershell
+# Tools baked into WIM (~20+ min, larger ISO, no network needed at boot)
+.\Build-Recovery-BakedIn.ps1
+
+# OR: lightweight WIM, tools download at boot (~5 min build, needs network at boot)
+.\Build-Recovery-OnDemand.ps1
+```
+
+**Expected Output:**
+- ✓ Creates HTA dual-mode boot menu (LIBR deploy OR Recovery Desktop)
+- ✓ BakedIn: Chrome, 7-Zip, Java Semeru 8 pre-staged in WIM (~600-700 MB ISO)
+- ✓ OnDemand: lighter WIM (~300-400 MB ISO), downloads ~350 MB at boot
+
 ### Step 4: Boot & Test
 
 ```powershell
@@ -135,12 +190,18 @@ Burn to USB with **Ventoy** or **Rufus**, then boot.
 wpeinit
   └ Initialize-OSDCloudStartnet   (WiFi drivers)
   └ Initialize-OSDCloudStartnetUpdate  (module refresh)
+  └ PowerShell Apply-GuiShellPack.ps1
+       └ (if present) apply ShellPack file+registry payload
+       └ apply Chrome + Java compatibility registry wiring
+       └ initialize AIM ramdisk if staged/enabled (non-blocking)
   └ mshta.exe Select-Mode.hta      (HTA boot menu)
         ├─ LIBR button     → PowerShell Start-OSDCloud -ZTI -Restart
         └─ Recovery button → PowerShell Start-RecoveryMode[OnDemand].ps1
-                                └ creates desktop shortcuts
+                                └ (OnDemand: downloads Chrome, 7-Zip, Java)
                                 └ sets JAVA_HOME / PATH
-                                └ Start-Process explorer.exe
+                                └ writes dependency log (baked-in mode)
+                                └ launches Recovery-Dashboard.hta
+                                      └ persistent launcher with 8 tool buttons
 ```
 
 ## What Gets Installed
@@ -153,8 +214,8 @@ Applications are portable (no MSI/Scoop) and staged into the WIM via OSD's autom
 
 | Component | Version | Size | In WinPE |
 |-----------|---------|------|----------|
-| IBM Semeru JRE 8 (OpenJ9) | 8u422+ | ~150 MB | `...\Tools\java` |
-| Google Chrome (portable) | 131+ | ~170 MB | `...\Tools\chrome` |
+| IBM Semeru JRE 8 (OpenJ9) | 8u482+ | ~150 MB | `...\Tools\java` |
+| Google Chrome (portable) | 145+ | ~170 MB | `...\Tools\chrome` |
 | 7-Zip (FM + CLI) | 24.09 | ~5 MB | `...\Tools\7zip` |
 | 7za.exe (CLI only) | built-in | ~1 MB | `X:\Windows\System32\7za.exe` (all ISOs) |
 
@@ -171,13 +232,20 @@ Environment variables set in WinPE at Recovery Desktop launch:
 | Button | Action |
 |--------|--------|
 | **LIBR** | Runs `Start-OSDCloud -ZTI -Restart` (full automated deploy) |
-| **Windows Recovery OS** | Runs `Start-RecoveryMode[OnDemand].ps1` → desktop + shortcuts |
+| **Recovery Dashboard** | Runs `Start-RecoveryMode[OnDemand].ps1` → launches Recovery Dashboard HTA |
 
-**Recovery Desktop Shortcuts** (created by Start-RecoveryMode):
-- **Chrome Browser** — portable, no first-run, custom profile dir
-- **7-Zip** — 7zFM.exe GUI file manager
-- **Java Prompt (Semeru 8)** — cmd.exe with `JAVA_HOME` pre-set
-- **LIBR — OSD Deploy** — launches `Start-OSDCloudGUI` in PowerShell
+**Recovery Dashboard** (`Recovery-Dashboard.hta`) — persistent launcher panel with 8 buttons:
+
+| Button | Action |
+|--------|--------|
+| **Chrome** | Portable Chrome browser (no first-run, custom profile) |
+| **7-Zip** | 7zFM.exe GUI file manager |
+| **Java Prompt** | cmd.exe with `JAVA_HOME` pre-set (Semeru 8) |
+| **PowerShell** | Windows PowerShell session |
+| **Command Prompt** | cmd.exe |
+| **Notepad** | Text editor |
+| **Disk Management** | diskpart |
+| **LIBR Deploy** | `Start-OSDCloudGUI` in PowerShell |
 
 ## Advanced Customization
 
@@ -208,7 +276,9 @@ Or pass a custom path: `.\Build-OSDCloud-Clean.ps1 -DriversPath "D:\MyDrivers"`
 
 ### Registry Changes
 
-Modify `Invoke-WinRECustomization` in [Build-OSDCloud-Clean.ps1](Build-OSDCloud-Clean.ps1) to add custom registry keys under the mounted WIM hives.
+**Deploy ISO** (`Build-OSDCloud-Clean.ps1`): Modify `Invoke-WinRECustomization` to add custom registry keys under the mounted WIM hives.
+
+**Recovery ISOs** (`Build-Recovery-BakedIn.ps1` / `Build-Recovery-OnDemand.ps1`): These do not mount the WIM directly — they use OSD's `Edit-OSDCloudWinPE` and `Config\` injection. Runtime customization is done in the `Start-RecoveryMode*.ps1` scripts embedded inside the WIM.
 
 ## Troubleshooting
 
@@ -261,8 +331,8 @@ Get-Process | Where-Object {$_.Name -like '*dism*'} | Stop-Process -Force
 
 ```powershell
 # Update component URLs when new versions release:
-# - IBM Semeru JRE 8: https://github.com/ibm-semeru-runtimes/open-jdk8u-releases/releases
-# - Chrome: https://dl.google.com/release2/chrome/ (inspect network traffic for uncompressed URL)
+# - IBM Semeru JRE 8: https://github.com/ibmruntimes/semeru8-binaries/releases
+# - Chrome: https://github.com/Bush2021/chrome_installer/releases
 # - 7-Zip: https://www.7-zip.org/download.html
 # URLs are parameters on Build-Recovery-BakedIn.ps1 and Build-Recovery-OnDemand.ps1
 # e.g.: .\Build-Recovery-BakedIn.ps1 -ChromeUrl "https://...new-url..."
@@ -301,6 +371,14 @@ To improve this project:
 - **IBM Semeru Runtimes**: IBM open-source license
 
 ## Changelog
+
+### v3.1.0 (March 2026)
+- ✨ Added GUI shell pack install media auto-acquire (`.wim/.esd/.iso/folder`) with automatic ESD→WIM export
+- ✨ Added boot-time Chrome compatibility registry wiring (App Paths, URL/file associations)
+- ✨ Added boot-time Java Semeru compatibility wiring (`.jar` association, JavaSoft compatibility keys, App Paths)
+- ✨ Added boot-time dependency logging mode (`DependencyCheck.log`) that never blocks dashboard launch
+- ✨ Added optional AIM RAM disk staging/init with graceful fallback
+- ✨ Updated Quick-Launch option 4 to prompt for optional GUI shell pack media source
 
 ### v3.0.0 (February 2026)
 - ✨ Replaced manual DISM WIM-mount pipeline with native OSD cmdlet calls
