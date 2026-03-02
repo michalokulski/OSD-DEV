@@ -193,7 +193,15 @@ function Resolve-InstallWimPath {
 
                 $root = "$($vol.DriveLetter):\"
                 $wimPath = Join-Path $root 'sources\install.wim'
-                if (Test-Path $wimPath) { return $wimPath }
+                if (Test-Path $wimPath) {
+                    # Must copy the .wim out BEFORE the finally block dismounts the ISO.
+                    # Returning the raw ISO-drive path would leave the caller with a
+                    # dead path once the ISO is unmounted.
+                    Write-Status "Copying install.wim from ISO to staging area..." -Type Info
+                    $copiedWim = Join-Path $ExportRoot 'install.auto.fromiso.wim'
+                    Copy-Item -LiteralPath $wimPath -Destination $copiedWim -Force
+                    return $copiedWim
+                }
 
                 $esdPath = Join-Path $root 'sources\install.esd'
                 if (Test-Path $esdPath) {
@@ -587,21 +595,22 @@ function Invoke-BuildGuiShellPack {
         foreach ($sourceSpec in $requiredPaths) {
             $trimmed = $sourceSpec.TrimStart('\\')
             $sourcePattern = Join-Path $mountDir $trimmed
-            $matches = @()
+            # NOTE: $matches is a PowerShell automatic variable (regex captures) -- do not use it.
+            $fileMatches = @()
 
             if ($sourceSpec.Contains('*')) {
-                $matches = @(Get-ChildItem -Path $sourcePattern -File -Force -ErrorAction SilentlyContinue)
+                $fileMatches = @(Get-ChildItem -Path $sourcePattern -File -Force -ErrorAction SilentlyContinue)
             } else {
                 $item = Get-Item -LiteralPath $sourcePattern -Force -ErrorAction SilentlyContinue
-                if ($item) { $matches = @($item) }
+                if ($item) { $fileMatches = @($item) }
             }
 
-            if ($matches.Count -eq 0) {
+            if ($fileMatches.Count -eq 0) {
                 $missing.Add($sourceSpec)
                 continue
             }
 
-            foreach ($match in $matches) {
+            foreach ($match in $fileMatches) {
                 $relative = $match.FullName.Substring($mountDir.Length).TrimStart('\\')
                 $destination = Join-Path $shellPackRoot $relative
 
@@ -659,7 +668,11 @@ function Invoke-BuildGuiShellPack {
 
         foreach ($entry in $regExports) {
             $outReg = Join-Path $registryPackRoot $entry.File
-            if (reg.exe query $entry.Key > $null 2>&1) {
+            # Use $LASTEXITCODE rather than wrapping reg.exe in an if() expression.
+            # "if (reg.exe query ... > $null)" in PowerShell always evaluates to $false
+            # because >$null suppresses the output used as the condition.
+            reg.exe query $entry.Key 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
                 reg.exe export $entry.Key $outReg /y | Out-Null
                 if (Test-Path $outReg) {
                     $regExported.Add($entry.File)
@@ -817,16 +830,16 @@ function LaunchRecovery() {
 # =============================================================
 $toolsBase = "X:\OSDCloud\Config\Tools"
 
-    $logRoot = "X:\OSDCloud\Logs"
-    New-Item $logRoot -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-    $depLog = Join-Path $logRoot "DependencyCheck.log"
+$logRoot = "X:\OSDCloud\Logs"
+New-Item $logRoot -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+$depLog = Join-Path $logRoot "DependencyCheck.log"
 
-    function Write-DepLog {
-        param([string]$Message,[string]$Level="INFO")
-        $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-        Write-Host $line
-        Add-Content -Path $depLog -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
-    }
+function Write-DepLog {
+    param([string]$Message,[string]$Level="INFO")
+    $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    Write-Host $line
+    Add-Content -Path $depLog -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+}
 
 Write-Host ""
 Write-Host "=== Recovery Mode ===" -ForegroundColor Cyan
@@ -937,20 +950,29 @@ if ($packApplied) {
     $registryPack = Join-Path $packRoot "RegistryPack"
     if (Test-Path $registryPack) {
         Write-ApplyLog "Applying GUI registry/service pack..."
+        # .reg files were built with HKLM\OSD_SRC_* paths (temp mount names used at BUILD time).
+        # In WinPE the hive files are already loaded by the OS as HKLM\SOFTWARE / HKLM\SYSTEM,
+        # so reg.exe load would fail and "reg.exe import" of OSD_SRC_* paths would be a no-op.
+        # Fix: rewrite the key paths in memory to the live hive names before importing.
+        # DEFAULT hive entries are omitted -- HKCU/.DEFAULT has no equivalent in headless WinPE.
+        $tmpRegDir = Join-Path $env:TEMP "OSDRegImportTmp"
+        New-Item $tmpRegDir -ItemType Directory -Force | Out-Null
         try {
-            reg.exe load HKLM\OSD_SRC_SOFTWARE "X:\Windows\System32\Config\SOFTWARE" | Out-Null
-            reg.exe load HKLM\OSD_SRC_SYSTEM   "X:\Windows\System32\Config\SYSTEM"   | Out-Null
-            reg.exe load HKLM\OSD_SRC_DEFAULT  "X:\Windows\System32\Config\DEFAULT"  | Out-Null
-
             Get-ChildItem $registryPack -Filter '*.reg' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '^DEFAULT-' } |
                 ForEach-Object {
-                    reg.exe import $_.FullName | Out-Null
+                    $regContent = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::Unicode)
+                    $regContent = $regContent `
+                        -replace 'HKEY_LOCAL_MACHINE\\OSD_SRC_SOFTWARE', 'HKEY_LOCAL_MACHINE\SOFTWARE' `
+                        -replace 'HKEY_LOCAL_MACHINE\\OSD_SRC_SYSTEM',   'HKEY_LOCAL_MACHINE\SYSTEM'
+                    $tmpReg = Join-Path $tmpRegDir $_.Name
+                    [System.IO.File]::WriteAllText($tmpReg, $regContent, [System.Text.Encoding]::Unicode)
+                    reg.exe import $tmpReg 2>&1 | Out-Null
+                    Write-ApplyLog "Imported registry pack: $($_.Name) (exit $LASTEXITCODE)"
                 }
         }
         finally {
-            reg.exe unload HKLM\OSD_SRC_DEFAULT  > $null 2>&1
-            reg.exe unload HKLM\OSD_SRC_SYSTEM   > $null 2>&1
-            reg.exe unload HKLM\OSD_SRC_SOFTWARE > $null 2>&1
+            Remove-Item $tmpRegDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -1214,7 +1236,8 @@ window.onload = function() {
 };
 
 function LaunchChrome() {
-    sh.Run('"' + TOOLS + '\\chrome\\chrome.exe" --no-first-run --no-default-browser-check --disable-sync --disable-gpu --user-data-dir="' + TOOLS + '\\chrome\\profile"', 1, false);
+    // --no-sandbox is required in WinPE: no user account infrastructure exists for Chrome's sandbox.
+    sh.Run('"' + TOOLS + '\\chrome\\chrome.exe" --no-first-run --no-default-browser-check --disable-sync --disable-gpu --no-sandbox --user-data-dir="' + TOOLS + '\\chrome\\profile"', 1, false);
 }
 function Launch7Zip() {
     sh.Run('"' + TOOLS + '\\7zip\\7zFM.exe"', 1, false);
