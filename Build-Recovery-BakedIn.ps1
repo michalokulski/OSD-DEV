@@ -33,14 +33,15 @@ param(
     [int]      $InstallWimIndex = 1,
 
     # --- Arsenal Image Mounter (AIM) RAM disk integration ---
-    [switch]   $EnableAIMRamdisk = $true,
-    [string]   $AIMRuntimePath = "$PSScriptRoot\ArsenalImageMounter\Runtime",
-    [string]   $AIMDriverPath  = "$PSScriptRoot\ArsenalImageMounter\Driver",
-    [string]   $AIMRamdiskSize = "2GB",
-    [string]   $AIMRamdiskDrive = "R",
-    [string]   $AIMRamdiskLabel = "Ramdisk",
-    [string]   $AIMRamdiskFormat = "NTFS",
-    [switch]   $AIMUseRamdiskForTemp = $true,
+    # TODO: AIM/RAMDISK is intentionally disabled and fully commented out for now.
+    # [switch]   $EnableAIMRamdisk = $false,
+    # [string]   $AIMRuntimePath = "$PSScriptRoot\ArsenalImageMounter\Runtime",
+    # [string]   $AIMDriverPath  = "$PSScriptRoot\ArsenalImageMounter\Driver",
+    # [string]   $AIMRamdiskSize = "2GB",
+    # [string]   $AIMRamdiskDrive = "R",
+    # [string]   $AIMRamdiskLabel = "Ramdisk",
+    # [string]   $AIMRamdiskFormat = "NTFS",
+    # [switch]   $AIMUseRamdiskForTemp = $true,
 
     # --- Download URLs (update when versions go stale) ---
     # Chrome: uncompressed installer - extract Chrome-bin with 7-Zip
@@ -715,80 +716,9 @@ function Invoke-BuildGuiShellPack {
 #   $Workspace\Config\ArsenalImageMounter\Driver
 #   $Workspace\Config\ArsenalImageMounter\AIM-Settings.json
 # =================================================================
-function Invoke-StageAIMRamdisk {
-    if (-not $EnableAIMRamdisk) {
-        Write-Status "AIM RAM disk integration disabled" -Type Info
-        return
-    }
-
-    $aimConfigRoot = "$Workspace\Config\ArsenalImageMounter"
-    if (Test-Path $aimConfigRoot) { Remove-Item $aimConfigRoot -Recurse -Force }
-    New-Item $aimConfigRoot -ItemType Directory -Force | Out-Null
-
-    $runtimeDest = Join-Path $aimConfigRoot 'Runtime'
-    $driverDest  = Join-Path $aimConfigRoot 'Driver'
-
-    $runtimeReady = $false
-    $driverReady  = $false
-
-    if (Test-Path $AIMRuntimePath) {
-        New-Item $runtimeDest -ItemType Directory -Force | Out-Null
-        Copy-Item (Join-Path $AIMRuntimePath '*') -Destination $runtimeDest -Recurse -Force
-        $runtimeReady = $true
-    } else {
-        Write-Status "AIM runtime path not found: $AIMRuntimePath" -Type Warning
-    }
-
-    if (Test-Path $AIMDriverPath) {
-        New-Item $driverDest -ItemType Directory -Force | Out-Null
-        Copy-Item (Join-Path $AIMDriverPath '*') -Destination $driverDest -Recurse -Force
-        $driverReady = $true
-    } else {
-        Write-Status "AIM driver path not found: $AIMDriverPath" -Type Warning
-    }
-
-    $aimExe = $null
-    if ($runtimeReady) {
-        $aimExe = Get-ChildItem $runtimeDest -Recurse -File -Filter 'AimRamdrive.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-    }
-
-    $infCount = 0
-    if ($driverReady) {
-        $infCount = @(Get-ChildItem $driverDest -Recurse -File -Filter '*.inf' -ErrorAction SilentlyContinue).Count
-    }
-
-    $driveLetter = (($AIMRamdiskDrive -replace ':','').Trim().ToUpperInvariant())
-    if ([string]::IsNullOrWhiteSpace($driveLetter)) { $driveLetter = 'R' }
-
-    $enabled = $runtimeReady -and $driverReady -and ($null -ne $aimExe) -and ($infCount -gt 0)
-
-    $settings = [ordered]@{
-        Enabled = $enabled
-        Runtime = [ordered]@{
-            RuntimePathPresent = $runtimeReady
-            DriverPathPresent  = $driverReady
-            AimRamdriveExeFound = ($null -ne $aimExe)
-            DriverInfCount = $infCount
-        }
-        Ramdisk = [ordered]@{
-            Size = $AIMRamdiskSize
-            DriveLetter = $driveLetter
-            Label = $AIMRamdiskLabel
-            Format = $AIMRamdiskFormat
-            UseForTemp = [bool]$AIMUseRamdiskForTemp
-        }
-    }
-
-    $settingsPath = Join-Path $aimConfigRoot 'AIM-Settings.json'
-    $settings | ConvertTo-Json -Depth 6 | Set-Content $settingsPath -Encoding UTF8
-
-    if ($enabled) {
-        Write-Status "AIM staged for WinPE boot (drive $driveLetter:, size $AIMRamdiskSize, format $AIMRamdiskFormat)" -Type Success
-    }
-    else {
-        Write-Status "AIM staging incomplete; RAM disk auto-init will be skipped (see $settingsPath)" -Type Warning
-    }
-}
+# function Invoke-StageAIMRamdisk {
+#     TODO: AIM/RAMDISK staging is fully disabled for now due to PE boot instability.
+# }
 
 # =================================================================
 # STEP 5 - WRITE WinPE SCRIPTS -> $Workspace\Config\Scripts\
@@ -1124,73 +1054,12 @@ else {
     Write-ApplyLog "Java binary not found at $javaExe; skipped Java registry compatibility" "WARN"
 }
 
-$aimRoot = "X:\OSDCloud\Config\ArsenalImageMounter"
-$aimSettingsPath = Join-Path $aimRoot "AIM-Settings.json"
-if (Test-Path $aimSettingsPath) {
-    try {
-        $aimSettings = Get-Content $aimSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($aimSettings.Enabled) {
-            Write-ApplyLog "AIM settings enabled; staging driver/runtime..."
-
-            $aimRuntimeSrc = Join-Path $aimRoot "Runtime"
-            if (Test-Path $aimRuntimeSrc) {
-                robocopy $aimRuntimeSrc "X:\Windows\System32" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-            }
-
-            $aimDriverSrc = Join-Path $aimRoot "Driver"
-            if (Test-Path $aimDriverSrc) {
-                $infFiles = Get-ChildItem $aimDriverSrc -Recurse -Filter '*.inf' -File -ErrorAction SilentlyContinue
-                foreach ($inf in $infFiles) {
-                    pnputil.exe /add-driver "$($inf.FullName)" /install | Out-Null
-                }
-            }
-
-            $aimExe = "X:\Windows\System32\AimRamdrive.exe"
-            if (Test-Path $aimExe) {
-                $size  = [string]$aimSettings.Ramdisk.Size
-                $drive = [string]$aimSettings.Ramdisk.DriveLetter
-                $label = [string]$aimSettings.Ramdisk.Label
-                $fmt   = [string]$aimSettings.Ramdisk.Format
-
-                if ([string]::IsNullOrWhiteSpace($drive)) { $drive = 'R' }
-                $drive = ($drive -replace ':','').Trim().ToUpperInvariant()
-
-                $argLine = "$size $drive $label $fmt"
-                Write-ApplyLog "Initializing AIM ramdisk: $argLine"
-                $proc = Start-Process -FilePath $aimExe -ArgumentList $argLine -PassThru -Wait -WindowStyle Hidden
-
-                $driveRoot = "${drive}:\"
-                if ($proc.ExitCode -eq 0 -and (Test-Path $driveRoot)) {
-                    Write-ApplyLog "AIM ramdisk ready at $driveRoot"
-                    if ([bool]$aimSettings.Ramdisk.UseForTemp) {
-                        $tempPath = Join-Path $driveRoot "Temp"
-                        New-Item $tempPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-                        [Environment]::SetEnvironmentVariable("TEMP", $tempPath, "Machine")
-                        [Environment]::SetEnvironmentVariable("TMP",  $tempPath, "Machine")
-                        $env:TEMP = $tempPath
-                        $env:TMP  = $tempPath
-                        Write-ApplyLog "TEMP/TMP moved to $tempPath"
-                    }
-                }
-                else {
-                    Write-ApplyLog "AIM ramdisk init failed (exit code $($proc.ExitCode)); continuing without ramdisk" "WARN"
-                }
-            }
-            else {
-                Write-ApplyLog "AimRamdrive.exe not found in X:\Windows\System32; skipping ramdisk init" "WARN"
-            }
-        }
-        else {
-            Write-ApplyLog "AIM settings present but disabled; skipping ramdisk init"
-        }
-    }
-    catch {
-        Write-ApplyLog "AIM init error: $_" "WARN"
-    }
-}
-else {
-    Write-ApplyLog "AIM settings not found; skipping ramdisk init"
-}
+# TODO: AIM/RAMDISK boot-time init is fully disabled for now due to PE boot instability.
+# $aimRoot = "X:\OSDCloud\Config\ArsenalImageMounter"
+# $aimSettingsPath = Join-Path $aimRoot "AIM-Settings.json"
+# if (Test-Path $aimSettingsPath) {
+#     ...
+# }
 
 # Mirrors PhoenixPE behavior note: this binary can destabilize shell state in PE.
 $cloudStoreDll = "X:\Windows\System32\Windows.CloudStore.dll"
@@ -1420,7 +1289,7 @@ Invoke-TemplateSetup
 Invoke-WorkspaceSetup
 Invoke-RecoveryToolsDownload   # ~15-20 min first run (Chrome ~170MB, Java ~150MB, 7-Zip ~3MB)
 Invoke-BuildGuiShellPack
-Invoke-StageAIMRamdisk
+# Invoke-StageAIMRamdisk
 Invoke-WriteWinPEScripts
 Invoke-WinPEBuild
 

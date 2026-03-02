@@ -143,6 +143,7 @@ function Invoke-Menu {
             '4' {
                 Write-Status "Building Recovery ISO (Baked-In tools)..." -Type Success
                 Write-Status "Downloads Chrome, 7-Zip and IBM Semeru JRE 8 into the WIM -- allow 20+ min" -Type Warning
+                Write-Status "TODO: Auto-download/acquire of Windows install ISO/ESD is not implemented in Quick Launch yet" -Type Warning
 
                 Write-Host ""
                 Write-Host " Optional: Build GUI shell compatibility pack from install media" -ForegroundColor DarkGray
@@ -150,6 +151,7 @@ function Invoke-Menu {
                 $enablePack = (Read-Host).Trim().ToUpper()
 
                 if ($enablePack -eq 'Y') {
+                    # TODO: Add automated ISO/ESD download workflow (Media Creation Tool/UUP/official source integration).
                     Write-Host -NoNewline " Install media path (.wim/.esd/.iso/folder) [blank = auto]: "
                     $installMediaPath = (Read-Host).Trim()
 
