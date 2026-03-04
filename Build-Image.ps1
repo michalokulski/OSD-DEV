@@ -257,6 +257,7 @@ function Initialize-BuildEnvironment {
     Cache  = Join-Path "$WorkRoot" "Cache"
     Output = Join-Path "$WorkRoot" "Output"
     Temp   = Join-Path "$WorkRoot" "Temp"
+    Mount_Install = Join-Path "$WorkRoot" "Mount_Install"
   }
   foreach ($p in $Script:Config.Paths.Values) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
@@ -317,6 +318,7 @@ function Invoke-Cleanup {
   if (-not $SkipCleanup) {
     Remove-Item $Script:Config.Paths.Apps -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $Script:Config.Paths.Temp -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $Script:Config.Paths.Mount_Install -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   Stop-Transcript -ErrorAction SilentlyContinue
@@ -425,6 +427,68 @@ function Add-DellDrivers {
 }
 
 # ============================================
+# EXPLORER SHELL
+# ============================================
+function Add-ExplorerShell {
+  Write-BuildLog "Checking Explorer shell availability..."
+  $mount = $Script:Config.Paths.Mount
+  $explorerTarget = Join-Path $mount "Windows\explorer.exe"
+
+  if (Test-Path $explorerTarget) {
+    Write-BuildLog "Explorer.exe found in boot.wim" -Level "Success"
+    return
+  }
+
+  Write-BuildLog "Explorer.exe NOT found in boot.wim — extracting from install.wim..." -Level "Warning"
+  $installWim = Join-Path $Script:Config.Paths.ISO "sources\install.wim"
+  if (-not (Test-Path $installWim)) {
+    Write-BuildLog "install.wim not found in ISO source. Explorer shell will not be available." -Level "Error"
+    return
+  }
+
+  $mountInstall = $Script:Config.Paths.Mount_Install
+  if (-not (Test-Path $mountInstall)) { New-Item -ItemType Directory -Path $mountInstall -Force | Out-Null }
+
+  Write-BuildLog "Mounting install.wim (Index 1) for Explorer extraction..."
+  & $Script:Config.Tools.DISM /Mount-Image /ImageFile:"$installWim" /Index:1 /MountDir:"$mountInstall" /ReadOnly | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-BuildLog "Failed to mount install.wim for Explorer extraction" -Level "Error"
+    return
+  }
+
+  try {
+    # Core Explorer shell files needed for a functional desktop in WinPE
+    $shellFiles = @(
+      "Windows\explorer.exe",
+      "Windows\System32\ExplorerFrame.dll",
+      "Windows\System32\twinui.dll",
+      "Windows\System32\twinui.pcshell.dll",
+      "Windows\System32\Windows.UI.Immersive.dll",
+      "Windows\System32\authui.dll",
+      "Windows\System32\StartTileData.dll",
+      "Windows\System32\InputHost.dll",
+      "Windows\System32\TextInputFramework.dll"
+    )
+
+    $copied = 0
+    foreach ($file in $shellFiles) {
+      $src = Join-Path $mountInstall $file
+      $dst = Join-Path $mount $file
+      if ((Test-Path $src) -and -not (Test-Path $dst)) {
+        $dstDir = Split-Path $dst -Parent
+        if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
+        Copy-Item $src $dst -Force
+        $copied++
+      }
+    }
+    Write-BuildLog "Copied $copied Explorer shell files from install.wim" -Level "Success"
+  }
+  finally {
+    & $Script:Config.Tools.DISM /Unmount-Image /MountDir:"$mountInstall" /Discard | Out-Null
+  }
+}
+
+# ============================================
 # APPLICATIONS
 # ============================================
 function Ensure-7z {
@@ -466,10 +530,15 @@ function Assert-ChromePlusLayout {
 function Install-ChromeFromOfflineInstaller {
   param([string]$Installer,[string]$Dest)
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+  # Use 7z extraction first (reliable for Chrome NSIS/stub installer); fall back to /extract
   try {
-    Start-Process -FilePath $Installer -ArgumentList "/extract=`"$Dest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
-  } catch {
     Expand-7z -ArchivePath $Installer -Destination $Dest
+  } catch {
+    try {
+      Start-Process -FilePath $Installer -ArgumentList "/extract=`"$Dest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
+    } catch {
+      Write-BuildLog "Could not extract Chrome offline installer: $_" -Level "Warning"
+    }
   }
 }
 
@@ -487,10 +556,15 @@ function Get-Applications {
   }
   $osDest = Join-Path $apps "OpenShell"
   New-Item -ItemType Directory -Force -Path $osDest | Out-Null
+  # Use 7z extraction first (reliable for NSIS/Inno Setup EXEs); fall back to installer /extract
   try {
-    Start-Process -FilePath $osExe -ArgumentList "/extract=`"$osDest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
-  } catch {
     Expand-7z -ArchivePath $osExe -Destination $osDest
+  } catch {
+    try {
+      Start-Process -FilePath $osExe -ArgumentList "/extract=`"$osDest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
+    } catch {
+      Write-BuildLog "Could not extract Open-Shell installer: $_" -Level "Warning"
+    }
   }
   $Script:Config.Apps.OpenShell = $osDest
 
@@ -636,7 +710,7 @@ function Configure-SystemRegistry {
       $javaInstall = "C:\Program Files\PortableApps\Java"
       reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "$javaInstall" /f | Out-Null
       # Append Java\bin to PATH so java.exe is callable without full path
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Select-String "REG_" | ForEach-Object { ($_ -split "\s{2,}")[3] })
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+', '').Trim() })
       if ($existingPath) {
         reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$javaInstall\bin" /f | Out-Null
       } else {
@@ -648,7 +722,7 @@ function Configure-SystemRegistry {
     # Add 7-Zip to PATH
     if ($Script:Config.Apps.ContainsKey("7-Zip")) {
       $szInstall = "C:\Program Files\PortableApps\7-Zip"
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Select-String "REG_" | ForEach-Object { ($_ -split "\s{2,}")[3] })
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+', '').Trim() })
       if ($existingPath) {
         reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$szInstall" /f | Out-Null
       } else {
@@ -723,7 +797,7 @@ if exist "%SystemRoot%\System32\reg.exe" (
   reg add "HKCU\Software\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0x{ACCENT} /f >nul 2>&1
 )
 exit /b 0
-'@.Replace("{WALL}", ($wall ? $wall : "")).Replace("{ACCENT}", $AccentColor)
+'@.Replace("{WALL}", $(if ($wall) { $wall } else { "" })).Replace("{ACCENT}", $AccentColor)
 
   Set-Content -Path (Join-Path $postDir "PostShell.cmd") -Value $post -Encoding ASCII -Force
   Write-BuildLog "PostShell.cmd created" -Level "Success"
@@ -741,7 +815,7 @@ function Create-ChromeLauncher {
   # Runtime path: C:\Program Files\PortableApps\Chrome\Application\chrome.exe
   $buildAppsRoot = $Script:Config.Paths.Apps
   $runtimeAppsRoot = "C:\Program Files\PortableApps"
-  $chromeExeRuntime = $Script:Config.Apps.ChromeExe.Replace($buildAppsRoot, $runtimeAppsRoot)
+  $chromeExeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
 
   $launcher = @'
 @echo off
@@ -762,20 +836,30 @@ function Write-Winpeshl {
   $iniPath = Join-Path $mount "Windows\System32\winpeshl.ini"
 
   $launch = @("[LaunchApps]")
-  $launch += 'explorer.exe'
 
-  # Check in the mounted WIM, not the running system
+  # Verify explorer.exe exists in the image; fall back to cmd.exe
+  $explorerInWim = Join-Path $mount "Windows\explorer.exe"
+  if (Test-Path $explorerInWim) {
+    $launch += 'explorer.exe'
+  } else {
+    Write-BuildLog "explorer.exe not found in WIM — falling back to cmd.exe shell" -Level "Warning"
+    $launch += 'cmd.exe'
+  }
+
+  # Check in the mounted WIM, not the running system (PS 5.1 compatible — no ?. operator)
   $mountedBase = Join-Path $mount "Program Files\PortableApps"
-  $openShellPath = (Find-ExeUnder -Root (Join-Path $mountedBase "OpenShell") -ExeName "StartMenu.exe")?.FullName
-  $explorerPPPath = (Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe")?.FullName
+  $foundOS = Find-ExeUnder -Root (Join-Path $mountedBase "OpenShell") -ExeName "StartMenu.exe"
+  $openShellPath = if ($foundOS) { $foundOS.FullName } else { $null }
+  $foundEP = Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe"
+  $explorerPPPath = if ($foundEP) { $foundEP.FullName } else { $null }
 
-  # Convert to runtime paths (C:\ instead of mount path)
+  # Convert to runtime paths (C:\ instead of mount path) — case-insensitive replace
   if ($openShellPath) { 
-    $openShellPath = $openShellPath.Replace($mount, "C:")
+    $openShellPath = $openShellPath -replace [regex]::Escape($mount), 'C:'
     $launch += '"' + $openShellPath + '"' 
   }
   if ($IncludeExplorerPlus -and $explorerPPPath) { 
-    $explorerPPPath = $explorerPPPath.Replace($mount, "C:")
+    $explorerPPPath = $explorerPPPath -replace [regex]::Escape($mount), 'C:'
     $launch += '"' + $explorerPPPath + '"' 
   }
 
@@ -841,6 +925,7 @@ try {
 
   Add-WinPE-Packages
   Add-DellDrivers
+  Add-ExplorerShell
 
   Get-Applications
   Inject-AllApps
