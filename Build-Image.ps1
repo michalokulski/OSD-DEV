@@ -144,7 +144,7 @@ param(
   [uint64]$RamdiskSizeMB = 4096,
 
   [Parameter(Mandatory = $false)]
-  [string]$ADKPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment",
+  [string]$ADKPath = "",  # Will be auto-detected if not provided
 
   [Parameter(Mandatory = $false)][switch]$KeepMountedWIM,
   [Parameter(Mandatory = $false)][switch]$SkipCleanup,
@@ -243,57 +243,190 @@ function Write-BuildLog {
 # ============================================
 # SETUP
 # ============================================
+function Test-Administrator {
+  $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
+  return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Initialize-BuildEnvironment {
   Write-BuildLog "Initializing RAM OS Builder..."
 
+  # Verify Administrator privileges
+  if (-not (Test-Administrator)) {
+    throw "This script requires Administrator privileges. Please run PowerShell as Administrator and try again."
+  }
+  Write-BuildLog "Administrator privileges verified" -Level Info
+
+  # Normalize and validate WorkRoot path
+  $WorkRoot = "$WorkRoot".Replace('/', '\').Trim()
+  if ([string]::IsNullOrWhiteSpace($WorkRoot)) {
+    throw "WorkRoot path is empty or invalid"
+  }
+  
+  if (-not [System.IO.Path]::IsPathRooted($WorkRoot)) {
+    $WorkRoot = Join-Path (Get-Location).Path $WorkRoot
+  }
+  $WorkRoot = $WorkRoot.TrimEnd('\')
+  
+  if ([string]::IsNullOrWhiteSpace($WorkRoot)) {
+    throw "WorkRoot path resolved to empty value"
+  }
+
   # Ensure WorkRoot exists (may have been a new path accepted by validation)
-  if (-not (Test-Path $WorkRoot)) { New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null }
+  if (-not (Test-Path $WorkRoot)) { 
+    New-Item -ItemType Directory -Path $WorkRoot -Force -ErrorAction Stop | Out-Null 
+  }
 
+  # Build paths using explicit string concatenation (more reliable than Join-Path in PowerShell Core)
   $Script:Config.Paths = @{
-    Root   = (Resolve-Path "$WorkRoot").Path
-    ISO    = Join-Path "$WorkRoot" "ISO_Source"
-    Mount  = Join-Path "$WorkRoot" "Mount_WIM"
-    Apps   = Join-Path "$WorkRoot" "Apps"
-    Cache  = Join-Path "$WorkRoot" "Cache"
-    Output = Join-Path "$WorkRoot" "Output"
-    Temp   = Join-Path "$WorkRoot" "Temp"
-    Mount_Install = Join-Path "$WorkRoot" "Mount_Install"
+    Root   = $WorkRoot
+    ISO    = [System.IO.Path]::Combine($WorkRoot, "ISO_Source")
+    Mount  = [System.IO.Path]::Combine($WorkRoot, "Mount_WIM")
+    Apps   = [System.IO.Path]::Combine($WorkRoot, "Apps")
+    Cache  = [System.IO.Path]::Combine($WorkRoot, "Cache")
+    Output = [System.IO.Path]::Combine($WorkRoot, "Output")
+    Temp   = [System.IO.Path]::Combine($WorkRoot, "Temp")
+    Mount_Install = [System.IO.Path]::Combine($WorkRoot, "Mount_Install")
   }
+  
+  # Validate all paths before creating directories
+  foreach ($key in $Script:Config.Paths.Keys) {
+    $path = $Script:Config.Paths[$key]
+    if ([string]::IsNullOrWhiteSpace($path)) {
+      throw "Path '$key' resolved to empty value (WorkRoot='$WorkRoot')"
+    }
+  }
+  
+  # Create all directories
   foreach ($p in $Script:Config.Paths.Values) {
-    if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+    if (-not (Test-Path $p)) { 
+      New-Item -ItemType Directory -Path $p -Force -ErrorAction Stop | Out-Null 
+    }
   }
 
-  $Script:Config.LogFile = Join-Path $Script:Config.Paths.Output "Build-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-  Start-Transcript -Path $Script:Config.LogFile | Out-Null
+  $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $Script:Config.LogFile = [System.IO.Path]::Combine($Script:Config.Paths.Output, "Build-$timestamp.log")
+  if ([string]::IsNullOrWhiteSpace($Script:Config.LogFile)) {
+    throw "LogFile path resolved to empty value"
+  }
+  
+  Start-Transcript -Path $Script:Config.LogFile -ErrorAction Stop | Out-Null
 
   # Probe ADK + WinPE add-on
-  $candidates = @(
-    $ADKPath,
-    "${env:ProgramFiles(x86)}\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment",
-    "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
-  ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+  $progFiles86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+  $progFiles = [Environment]::GetEnvironmentVariable("ProgramFiles")
+  
+  Write-BuildLog "Detected ProgramFiles(x86): $progFiles86" -Level Info
+  Write-BuildLog "Detected ProgramFiles: $progFiles" -Level Info
+  
+  # Build candidate paths explicitly to avoid pipeline issues
+  $candidate1 = $ADKPath
+  $candidate2 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86, "Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  $candidate3 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86, "Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  $candidate4 = if ($progFiles) { [System.IO.Path]::Combine($progFiles, "Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  $candidate5 = if ($progFiles) { [System.IO.Path]::Combine($progFiles, "Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  
+  Write-BuildLog "Candidate paths constructed: c1=$candidate1 | c2=$candidate2 | c3=$candidate3 | c4=$candidate4 | c5=$candidate5" -Level Info
+  
+  # Filter candidates without using pipeline to avoid PowerShell unpacking strings with parentheses
+  $candidates = @()
+  foreach ($c in @($candidate1, $candidate2, $candidate3, $candidate4, $candidate5)) {
+    if ($c -and $c.Length -gt 3 -and (Test-Path $c)) {
+      # Check if already in array before adding (Select-Object -Unique)
+      if ($candidates -notcontains $c) {
+        $candidates += $c
+      }
+    }
+  }
+  
+  Write-BuildLog "After filtering - Candidates count: $($candidates.Count)" -Level Info
+  if ($candidates.Count -gt 0) {
+    Write-BuildLog "First candidate after filter: [$($candidates[0])] | Type: $($candidates[0].GetType().Name)" -Level Info
+  }
 
-  if (-not $candidates) {
-    throw "Windows ADK WinPE add-on not found. Install ADK + WinPE add-on: https://aka.ms/adk"
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    $msg = @"
+Windows ADK WinPE add-on not found in any standard location.
+
+REQUIRED: Install Windows Assessment and Deployment Kit (ADK) with WinPE:
+1. Download: https://aka.ms/adk
+2. Run the installer
+3. Select "Windows Preinstallation Environment (Windows PE)"
+4. Ensure "Deployment Tools" is also selected
+
+Locations checked:
+  - $progFiles86\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment
+  - $progFiles86\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment
+  - $progFiles\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment
+  - $progFiles\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment
+
+Or provide a custom path: -ADKPath "C:\Path\To\Windows Preinstallation Environment"
+"@
+    throw $msg
   }
 
   $winpeAddOn = $candidates[0]
-  $adkRoot    = Split-Path $winpeAddOn
+  Write-BuildLog "Variable winpeAddOn assigned: [$winpeAddOn]" -Level Info
+  
+  $adkRoot = Split-Path -Path "$winpeAddOn" -Parent
+  Write-BuildLog "After Split-Path - adkRoot: [$adkRoot]" -Level Info
+  
+  if ([string]::IsNullOrWhiteSpace($adkRoot)) {
+    throw "ADK Root path is empty after Split-Path. WinPE path was: '$winpeAddOn'"
+  }
+
+  Write-BuildLog "ADK Root detected: $adkRoot" -Level Info
+  Write-BuildLog "WinPE Add-On detected: $winpeAddOn" -Level Info
 
   $Script:Config.Tools = @{
-    DISM     = Join-Path $adkRoot "Deployment Tools\AMD64\DISM\dism.exe"
-    OSCDIMG  = Join-Path $adkRoot "Deployment Tools\AMD64\Oscdimg\oscdimg.exe"
-    WinPEOCs = Join-Path $winpeAddOn "amd64\WinPE_OCs"
+    DISM     = [System.IO.Path]::Combine($adkRoot, "Deployment Tools\amd64\DISM\dism.exe")
+    OSCDIMG  = [System.IO.Path]::Combine($adkRoot, "Deployment Tools\amd64\Oscdimg\oscdimg.exe")
+    WinPEOCs = [System.IO.Path]::Combine($winpeAddOn, "amd64\WinPE_OCs")
   }
 
+  Write-BuildLog "DISM path: $($Script:Config.Tools.DISM)" -Level Info
+  Write-BuildLog "OSCDIMG path: $($Script:Config.Tools.OSCDIMG)" -Level Info
+  Write-BuildLog "WinPE OCs path: $($Script:Config.Tools.WinPEOCs)" -Level Info
+
   if (-not (Test-Path $Script:Config.Tools.DISM)) {
-    $Script:Config.Tools.DISM = (Get-Command dism.exe).Source
+    Write-BuildLog "DISM not found at: $($Script:Config.Tools.DISM) - trying PATH" -Level Warning
+    try {
+      $Script:Config.Tools.DISM = (Get-Command dism.exe -ErrorAction Stop).Source
+    } catch {
+      throw "DISM.exe not found. Ensure Windows ADK is installed or DISM is available in PATH"
+    }
   }
+  
   if (-not (Test-Path $Script:Config.Tools.OSCDIMG)) {
-    throw "OSCDIMG.exe not found in ADK installation"
+    Write-BuildLog "OSCDIMG not found at: $($Script:Config.Tools.OSCDIMG) - checking if file exists with Test-Path verbose" -Level Warning
+    try {
+      $Script:Config.Tools.OSCDIMG = (Get-Command oscdimg.exe -ErrorAction Stop).Source
+    } catch {
+      $msg = @"
+OSCDIMG.exe not found in ADK installation or PATH.
+
+This tool is required to build the ISO image. The Windows ADK with WinPE must be installed.
+
+To install ADK:
+1. Download from: https://aka.ms/adk
+2. Run the installer and select "Windows Preinstallation Environment (Windows PE)" option
+3. Ensure "Deployment Tools" is also selected for OSCDIMG.exe
+
+Alternatively, you can specify the ADK path using:
+  -ADKPath "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit"
+
+Current ADK candidates checked:
+  - $ADKPath
+  - `${env:ProgramFiles(x86)}\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment`
+  - `${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment`
+"@
+      throw $msg
+    }
   }
+  
   if (-not (Test-Path $Script:Config.Tools.WinPEOCs)) {
-    throw "WinPE optional components folder not found: $($Script:Config.Tools.WinPEOCs)"
+    throw "WinPE optional components folder not found: $($Script:Config.Tools.WinPEOCs)`nEnsure Windows ADK with WinPE add-on is properly installed."
   }
 
   try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -345,7 +478,7 @@ function Mount-SourceISO {
   if ($LASTEXITCODE -gt 7) { throw "Robocopy failed with exit code: $LASTEXITCODE" }
 
   Dismount-DiskImage -ImagePath "$SourceISO" | Out-Null
-  return (Join-Path $Script:Config.Paths.ISO "sources\boot.wim")
+  return [System.IO.Path]::Combine($Script:Config.Paths.ISO, "sources", "boot.wim")
 }
 
 function Mount-TargetWIM {
@@ -355,12 +488,52 @@ function Mount-TargetWIM {
   )
 
   Write-BuildLog "Mounting boot.wim (Index $Index)..."
-  & $Script:Config.Tools.DISM /Mount-Image /ImageFile:"$WimPath" /Index:$Index /MountDir:$Script:Config.Paths.Mount | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Failed to mount WIM. Ensure no mount conflicts and sufficient disk space." }
+  Write-BuildLog "WIM file path: $WimPath" -Level Info
+  Write-BuildLog "DISM tool: $($Script:Config.Tools.DISM)" -Level Info
+  Write-BuildLog "Mount target: $($Script:Config.Paths.Mount)" -Level Info
+  
+  # Check if WIM file exists and is accessible
+  if (-not (Test-Path "$WimPath")) {
+    throw "WIM file not found: $WimPath"
+  }
+  
+  # Reset WIM file attributes to remove read-only (common issue with ISO-extracted files)
+  Write-BuildLog "Resetting WIM file attributes..." -Level Info
+  try {
+    $wimItem = Get-Item "$WimPath" -Force
+    if ($wimItem.Attributes -match 'ReadOnly') {
+      $wimItem.Attributes = $wimItem.Attributes -bxor 'ReadOnly'
+      Write-BuildLog "Read-only attribute removed from WIM file" -Level Info
+    }
+  } catch {
+    Write-BuildLog "Warning: Could not reset WIM attributes: $_" -Level Warning
+  }
+  
+  # Clean up any previous mounts at this location
+  $existingMount = Get-Item "$($Script:Config.Paths.Mount)" -ErrorAction SilentlyContinue
+  if ($existingMount -and (Get-ChildItem "$($Script:Config.Paths.Mount)" -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) {
+    Write-BuildLog "Mount directory not empty, attempting to dismount..." -Level Warning
+    & $Script:Config.Tools.DISM /Unmount-Image /MountDir:$($Script:Config.Paths.Mount) /Discard 2>&1 | Out-Null
+  }
+  
+  $output = & $Script:Config.Tools.DISM /Mount-Image /ImageFile:"$WimPath" /Index:$Index /MountDir:$($Script:Config.Paths.Mount) 2>&1
+  $exitCode = $LASTEXITCODE
+  
+  Write-BuildLog "DISM mount output (exit code $exitCode):" -Level Info
+  $output | ForEach-Object { Write-BuildLog "  $_" -Level Info }
+  
+  if ($exitCode -ne 0) { 
+    $msg = "Failed to mount WIM (exit code $exitCode).`n`nTroubleshooting steps:`n"
+    $msg += "1. Ensure PowerShell is running as Administrator (right-click Run as Administrator)`n"
+    $msg += "2. Close all file explorers accessing C:\WorkRoot`n"
+    $msg += "3. Ensure no previous mounts in C:\WorkRoot\Mount_WIM (DISM /unmount-image /mountdir:C:\WorkRoot\Mount_WIM /discard)`n"
+    $msg += "4. Try again`n`nSee DISM log: C:\WINDOWS\Logs\DISM\dism.log"
+    throw $msg 
+  }
   $Script:State.Mounted = $true
 
   foreach ($hive in "SYSTEM","SOFTWARE") {
-    $p = Join-Path $Script:Config.Paths.Mount "Windows\System32\config\$hive"
+    $p = [System.IO.Path]::Combine($Script:Config.Paths.Mount, "Windows", "System32", "config", $hive)
     if (-not (Test-Path $p)) { throw "$hive hive missing in mounted WIM" }
   }
 
@@ -373,17 +546,17 @@ function Add-WinPE-Packages {
   $count = 0
   $ocRoot = $Script:Config.Tools.WinPEOCs
   $lang = $Script:Config.Locale
-  if (-not (Test-Path (Join-Path $ocRoot "$lang"))) { $lang = "en-us" }
+  if (-not (Test-Path ([System.IO.Path]::Combine($ocRoot, $lang)))) { $lang = "en-us" }
 
   $packages = $Script:WinPEPackages.Clone()
   if ($EnableFBWF) { $packages += "WinPE-FBWF" }
 
   foreach ($pkg in $packages) {
-    $cab = Join-Path $ocRoot "$pkg.cab"
+    $cab = [System.IO.Path]::Combine($ocRoot, "$pkg.cab")
     if (Test-Path $cab) {
       & $Script:Config.Tools.DISM /Add-Package /Image:"$mount" /PackagePath:"$cab" /IgnoreCheck | Out-Null
       if ($LASTEXITCODE -eq 0) { $count++ } else { Write-BuildLog "Failed adding package: $pkg" -Level Warning }
-      $langCab = Join-Path $ocRoot "$lang\${pkg}_${lang}.cab"
+      $langCab = [System.IO.Path]::Combine($ocRoot, $lang, "${pkg}_${lang}.cab")
       if (Test-Path $langCab) {
         & $Script:Config.Tools.DISM /Add-Package /Image:"$mount" /PackagePath:"$langCab" /IgnoreCheck | Out-Null
       }
@@ -400,7 +573,7 @@ function Add-DellDrivers {
   if (-not $IncludeDellDrivers) { return }
 
   Write-BuildLog "Acquiring Dell WinPE11 drivers..."
-  $dellCab = Join-Path $Script:Config.Paths.Cache "Dell-WinPE11-Drivers.cab"
+  $dellCab = [System.IO.Path]::Combine($Script:Config.Paths.Cache, "Dell-WinPE11-Drivers.cab")
   if (-not (Test-Path $dellCab)) {
     try {
       Invoke-WebRequest -Uri $Script:AppSources.DellWinPEDrivers -OutFile $dellCab -UseBasicParsing
@@ -411,7 +584,7 @@ function Add-DellDrivers {
   }
 
   Write-BuildLog "Extracting and injecting Dell drivers..."
-  $extractDir = Join-Path $Script:Config.Paths.Temp "DellDrivers"
+  $extractDir = [System.IO.Path]::Combine($Script:Config.Paths.Temp, "DellDrivers")
   New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
   & "$env:SystemRoot\System32\expand.exe" -F:* "$dellCab" "$extractDir" | Out-Null
 
