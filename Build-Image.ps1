@@ -670,12 +670,20 @@ function Write-Winpeshl {
   $launch = @("[LaunchApps]")
   $launch += 'explorer.exe'
 
-  $base = "C:\Program Files\PortableApps"
-  $openShellPath = (Find-ExeUnder -Root (Join-Path $base "OpenShell") -ExeName "StartMenu.exe")?.FullName
-  $explorerPPPath = (Find-ExeUnder -Root (Join-Path $base "ExplorerPP") -ExeName "Explorer++.exe")?.FullName
+  # Check in the mounted WIM, not the running system
+  $mountedBase = Join-Path $mount "Program Files\PortableApps"
+  $openShellPath = (Find-ExeUnder -Root (Join-Path $mountedBase "OpenShell") -ExeName "StartMenu.exe")?.FullName
+  $explorerPPPath = (Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe")?.FullName
 
-  if ($openShellPath)  { $launch += '"' + $openShellPath + '"' }
-  if ($IncludeExplorerPlus -and $explorerPPPath) { $launch += '"' + $explorerPPPath + '"' }
+  # Convert to runtime paths (C:\ instead of mount path)
+  if ($openShellPath) { 
+    $openShellPath = $openShellPath.Replace($mount, "C:")
+    $launch += '"' + $openShellPath + '"' 
+  }
+  if ($IncludeExplorerPlus -and $explorerPPPath) { 
+    $explorerPPPath = $explorerPPPath.Replace($mount, "C:")
+    $launch += '"' + $explorerPPPath + '"' 
+  }
 
   # If Chrome launcher exists, run it after Explorer so profile lives on X:\
   $chromeLauncher = "%SystemRoot%\System32\RAMOS\StartChrome.cmd"
