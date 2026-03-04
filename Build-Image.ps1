@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Advanced RAM OS Builder with Hardware Support (Fixed & Validated)
 Creates a Windows PE-based RAM Operating System with Explorer shell, optional apps, Dell drivers, and visual theming.
@@ -72,7 +72,7 @@ param(
   [ValidateScript({
       if (-not (Test-Path "$_")) { throw "Source ISO not found: $_" }
       $true
-  })]
+    })]
   [string]$SourceISO,
 
   [Parameter(Mandatory = $true)]
@@ -91,45 +91,45 @@ param(
       $free = ([System.IO.DriveInfo]::new("$drive\")).AvailableFreeSpace / 1GB
       if ($free -lt 20) { throw "Insufficient space on $drive ($([math]::Round($free,2)) GB, need 20+)" }
       $true
-  })]
+    })]
   [string]$WorkRoot,
 
-  [Parameter(Mandatory = $false)][switch]$UseChromePlus,
+  [Parameter(Mandatory = $false)] [switch]$UseChromePlus,
 
   [Parameter(Mandatory = $false)]
   [ValidateScript({
-      if ($_){
+      if ($_) {
         if (-not (Test-Path "$_")) { throw "Chrome offline installer not found: $_" }
         $ext = [IO.Path]::GetExtension("$_").ToLower()
         if ($ext -notin @('.exe','.zip','.7z')) { throw "Offline installer must be .exe, .zip or .7z" }
       }
       $true
-  })]
+    })]
   [string]$ChromeOfflineInstallerPath = "",
 
   [Parameter(Mandatory = $false)]
   [ValidateScript({
-      if ($_){
+      if ($_) {
         if (-not (Test-Path "$_")) { throw "Chrome portable path not found: $_" }
         $ext = [System.IO.Path]::GetExtension("$_").ToLower()
         if ($ext -notin @('.zip','.exe','.7z')) { throw "Chrome must be .zip, .7z or .exe" }
       }
       $true
-  })]
+    })]
   [string]$ChromePortablePath = "",
 
-  [Parameter(Mandatory = $false)][switch]$IncludeExplorerPlus,
-  [Parameter(Mandatory = $false)][switch]$IncludeDellDrivers,
+  [Parameter(Mandatory = $false)] [switch]$IncludeExplorerPlus,
+  [Parameter(Mandatory = $false)] [switch]$IncludeDellDrivers,
 
   [Parameter(Mandatory = $false)]
   [ValidateScript({
-      if ($_){
+      if ($_) {
         if (-not (Test-Path "$_")) { throw "Wallpaper not found: $_" }
         $ext = [System.IO.Path]::GetExtension("$_").ToLower()
         if ($ext -notin @('.jpg','.jpeg','.png','.bmp')) { throw "Wallpaper must be image file" }
       }
       $true
-  })]
+    })]
   [string]$WallpaperPath,
 
   [Parameter(Mandatory = $false)]
@@ -144,10 +144,10 @@ param(
   [uint64]$RamdiskSizeMB = 4096,
 
   [Parameter(Mandatory = $false)]
-  [string]$ADKPath = "",  # Will be auto-detected if not provided
+  [string]$ADKPath = "",# Will be auto-detected if not provided
 
-  [Parameter(Mandatory = $false)][switch]$KeepMountedWIM,
-  [Parameter(Mandatory = $false)][switch]$SkipCleanup,
+  [Parameter(Mandatory = $false)] [switch]$KeepMountedWIM,
+  [Parameter(Mandatory = $false)] [switch]$SkipCleanup,
 
   [Parameter(Mandatory = $false)]
   [ValidateSet(1,2)]
@@ -182,29 +182,35 @@ $Script:Config = @{
 # Latest stable sources (with fallbacks where useful)
 $Script:AppSources = @{
   # Open-Shell official (4.4.196). We extract from the installer to achieve a portable layout.
-  OpenShellExe        = "https://github.com/Open-Shell/Open-Shell-Menu/releases/download/v4.4.196/OpenShellSetup_4_4_196.exe"
+  OpenShellExe = "https://github.com/Open-Shell/Open-Shell-Menu/releases/download/v4.4.196/OpenShellSetup_4_4_196.exe"
   # Fallback mirror (in case GitHub throttles)
-  OpenShellExeMirror  = "https://sourceforge.net/projects/open-shell.mirror/files/v4.4.196/OpenShellSetup_4_4_196.exe/download"
+  OpenShellExeMirror = "https://sourceforge.net/projects/open-shell.mirror/files/v4.4.196/OpenShellSetup_4_4_196.exe/download"
 
   # IBM Semeru (prefer latest 8u482; fallback to previously-used 8u472)
-  SemeruPrimary       = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u482-b08_openj9-0.57.0/ibm-semeru-open-jdk_x64_windows_8u482b08_openj9-0.57.0.zip"
-  SemeruFallback      = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u472-b08_openj9-0.56.0/ibm-semeru-open-jdk_x64_windows_8u472b08_openj9-0.56.0-portable.zip"
+  SemeruPrimary = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u482-b08_openj9-0.57.0/ibm-semeru-open-jdk_x64_windows_8u482b08_openj9-0.57.0.zip"
+  SemeruFallback = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u472-b08_openj9-0.56.0/ibm-semeru-open-jdk_x64_windows_8u472b08_openj9-0.56.0-portable.zip"
 
   # Explorer++ official portable ZIP
-  ExplorerPlusPlus    = "https://github.com/derceg/explorerplusplus/releases/download/version-1.4.0/explorerpp_x64.zip"
+  ExplorerPlusPlus = "https://github.com/derceg/explorerplusplus/releases/download/version-1.4.0/explorerpp_x64.zip"
 
   # Chrome++ (Chrome Plus) packaged as .7z; requires version.dll next to chrome.exe
-  ChromePlus          = "https://github.com/Bush2021/chrome_plus/releases/download/1.15.1/Chrome++_v1.15.1_x86_x64_arm64.7z"
+  ChromePlus = "https://github.com/Bush2021/chrome_plus/releases/download/1.15.1/Chrome++_v1.15.1_x86_x64_arm64.7z"
+
+  # Get Chrome Installer Unpacked
+  # GitHub Source: https://github.com/Bush2021/chrome_installer
+  ChromeStandaloneFallback = "https://dl.google.com/release2/chrome/nuloamky47wcog6772kpqu2zyu_145.0.7632.160/145.0.7632.160_chrome_installer_uncompressed.exe"
+  ChromeStandaloneDirect = "https://github.com/Bush2021/chrome_installer/releases/download/145.0.7632.160/x64_145.0.7632.160_chrome_installer_uncompressed.exe"
+  ChromeInstallerUnpacked  = "https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26iid%3D%7B17AE9393-1804-430E-8967-BFC16616F2FA%7D%26lang%3Den%26browser%3D5%26usagestats%3D0%26appname%3DGoogle%2520Chrome%26needsadmin%3Dprefers%26ap%3D-arch_x64-statsdef_1%26installdataindex%3Dempty/chrome/install/ChromeStandaloneSetup64.exe"
 
   # Dell WinPE 11 driver pack A08 (Dec 23, 2025)
-  DellWinPEDrivers    = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab"
+  DellWinPEDrivers = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab"
 
   # Minimal 7-zip standalone extractor (build-time only)
-  SevenZipMini        = "https://www.7-zip.org/a/7zr.exe"
+  SevenZipMini = "https://www.7-zip.org/a/7zr.exe"
 
   # Full 7-Zip portable (console + GUI) for injection into the image
-  SevenZipExtra       = "https://www.7-zip.org/a/7z2408-extra.7z"
-  SevenZipFull        = "https://www.7-zip.org/a/7z2408-x64.exe"
+  SevenZipExtra = "https://www.7-zip.org/a/7z2408-extra.7z"
+  SevenZipFull = "https://www.7-zip.org/a/7z2408-x64.exe"
 }
 
 # Valid WinPE OCs per MS docs; language packs added when present
@@ -214,12 +220,17 @@ $Script:WinPEPackages = @(
   "WinPE-PowerShell",
   "WinPE-HTA",
   "WinPE-NetFx",
-  "WinPE-WOW64",
+  # TODO: WinPE-WOW64 - 32-bit subsystem support for 64-bit WinPE
+  # Currently commented out as it may not be available in all ADK versions
+  # See: https://github.com/slorelee/wimbuilder2/tree/master/Projects/WIN10XPE/01-Components/SysWOW64_Basic
+  # Uncomment if you need 32-bit application support in 64-bit WinPE
+  # "WinPE-WOW64",
   "WinPE-Fonts-Legacy",
   "WinPE-StorageWMI",
   "WinPE-DismCmdlets",
   "WinPE-FMAPI",
-  "WinPE-WiFi"
+  "WinPE-WiFi-Package",
+  "WinPE-SRT"
 )
 
 # ============================================
@@ -227,15 +238,15 @@ $Script:WinPEPackages = @(
 # ============================================
 function Write-BuildLog {
   param(
-    [Parameter(Mandatory = $true)][string]$Message,
-    [ValidateSet("Info","Success","Warning","Error")][string]$Level = "Info"
+    [Parameter(Mandatory = $true)] [string]$Message,
+    [ValidateSet("Info","Success","Warning","Error")] [string]$Level = "Info"
   )
   $ts = Get-Date -Format "HH:mm:ss"
   $color = switch ($Level) {
     "Success" { "Green" }
-    "Error"   { "Red" }
+    "Error" { "Red" }
     "Warning" { "Yellow" }
-    default   { "Cyan" }
+    default { "Cyan" }
   }
   Write-Host "[$ts] [$Level] $Message" -ForegroundColor $color
 }
@@ -245,7 +256,7 @@ function Write-BuildLog {
 # ============================================
 function Test-Administrator {
   $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-  $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
+  $principal = New-Object System.Security.Principal.WindowsPrincipal ($id)
   return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
@@ -259,37 +270,37 @@ function Initialize-BuildEnvironment {
   Write-BuildLog "Administrator privileges verified" -Level Info
 
   # Normalize and validate WorkRoot path
-  $WorkRoot = "$WorkRoot".Replace('/', '\').Trim()
+  $WorkRoot = "$WorkRoot".Replace('/','\').Trim()
   if ([string]::IsNullOrWhiteSpace($WorkRoot)) {
     throw "WorkRoot path is empty or invalid"
   }
-  
+
   if (-not [System.IO.Path]::IsPathRooted($WorkRoot)) {
     $WorkRoot = Join-Path (Get-Location).Path $WorkRoot
   }
   $WorkRoot = $WorkRoot.TrimEnd('\')
-  
+
   if ([string]::IsNullOrWhiteSpace($WorkRoot)) {
     throw "WorkRoot path resolved to empty value"
   }
 
   # Ensure WorkRoot exists (may have been a new path accepted by validation)
-  if (-not (Test-Path $WorkRoot)) { 
-    New-Item -ItemType Directory -Path $WorkRoot -Force -ErrorAction Stop | Out-Null 
+  if (-not (Test-Path $WorkRoot)) {
+    New-Item -ItemType Directory -Path $WorkRoot -Force -ErrorAction Stop | Out-Null
   }
 
   # Build paths using explicit string concatenation (more reliable than Join-Path in PowerShell Core)
   $Script:Config.Paths = @{
-    Root   = $WorkRoot
-    ISO    = [System.IO.Path]::Combine($WorkRoot, "ISO_Source")
-    Mount  = [System.IO.Path]::Combine($WorkRoot, "Mount_WIM")
-    Apps   = [System.IO.Path]::Combine($WorkRoot, "Apps")
-    Cache  = [System.IO.Path]::Combine($WorkRoot, "Cache")
-    Output = [System.IO.Path]::Combine($WorkRoot, "Output")
-    Temp   = [System.IO.Path]::Combine($WorkRoot, "Temp")
-    Mount_Install = [System.IO.Path]::Combine($WorkRoot, "Mount_Install")
+    Root = $WorkRoot
+    ISO = [System.IO.Path]::Combine($WorkRoot,"ISO_Source")
+    Mount = [System.IO.Path]::Combine($WorkRoot,"Mount_WIM")
+    Apps = [System.IO.Path]::Combine($WorkRoot,"Apps")
+    Cache = [System.IO.Path]::Combine($WorkRoot,"Cache")
+    Output = [System.IO.Path]::Combine($WorkRoot,"Output")
+    Temp = [System.IO.Path]::Combine($WorkRoot,"Temp")
+    Mount_Install = [System.IO.Path]::Combine($WorkRoot,"Mount_Install")
   }
-  
+
   # Validate all paths before creating directories
   foreach ($key in $Script:Config.Paths.Keys) {
     $path = $Script:Config.Paths[$key]
@@ -297,41 +308,41 @@ function Initialize-BuildEnvironment {
       throw "Path '$key' resolved to empty value (WorkRoot='$WorkRoot')"
     }
   }
-  
+
   # Create all directories
   foreach ($p in $Script:Config.Paths.Values) {
-    if (-not (Test-Path $p)) { 
-      New-Item -ItemType Directory -Path $p -Force -ErrorAction Stop | Out-Null 
+    if (-not (Test-Path $p)) {
+      New-Item -ItemType Directory -Path $p -Force -ErrorAction Stop | Out-Null
     }
   }
 
   $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-  $Script:Config.LogFile = [System.IO.Path]::Combine($Script:Config.Paths.Output, "Build-$timestamp.log")
+  $Script:Config.LogFile = [System.IO.Path]::Combine($Script:Config.Paths.Output,"Build-$timestamp.log")
   if ([string]::IsNullOrWhiteSpace($Script:Config.LogFile)) {
     throw "LogFile path resolved to empty value"
   }
-  
+
   Start-Transcript -Path $Script:Config.LogFile -ErrorAction Stop | Out-Null
 
   # Probe ADK + WinPE add-on
   $progFiles86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
   $progFiles = [Environment]::GetEnvironmentVariable("ProgramFiles")
-  
+
   Write-BuildLog "Detected ProgramFiles(x86): $progFiles86" -Level Info
   Write-BuildLog "Detected ProgramFiles: $progFiles" -Level Info
-  
+
   # Build candidate paths explicitly to avoid pipeline issues
   $candidate1 = $ADKPath
-  $candidate2 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86, "Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  $candidate3 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86, "Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  $candidate4 = if ($progFiles) { [System.IO.Path]::Combine($progFiles, "Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  $candidate5 = if ($progFiles) { [System.IO.Path]::Combine($progFiles, "Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  
+  $candidate2 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86,"Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  $candidate3 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86,"Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  $candidate4 = if ($progFiles) { [System.IO.Path]::Combine($progFiles,"Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+  $candidate5 = if ($progFiles) { [System.IO.Path]::Combine($progFiles,"Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
+
   Write-BuildLog "Candidate paths constructed: c1=$candidate1 | c2=$candidate2 | c3=$candidate3 | c4=$candidate4 | c5=$candidate5" -Level Info
-  
+
   # Filter candidates without using pipeline to avoid PowerShell unpacking strings with parentheses
   $candidates = @()
-  foreach ($c in @($candidate1, $candidate2, $candidate3, $candidate4, $candidate5)) {
+  foreach ($c in @($candidate1,$candidate2,$candidate3,$candidate4,$candidate5)) {
     if ($c -and $c.Length -gt 3 -and (Test-Path $c)) {
       # Check if already in array before adding (Select-Object -Unique)
       if ($candidates -notcontains $c) {
@@ -339,7 +350,7 @@ function Initialize-BuildEnvironment {
       }
     }
   }
-  
+
   Write-BuildLog "After filtering - Candidates count: $($candidates.Count)" -Level Info
   if ($candidates.Count -gt 0) {
     Write-BuildLog "First candidate after filter: [$($candidates[0])] | Type: $($candidates[0].GetType().Name)" -Level Info
@@ -368,10 +379,10 @@ Or provide a custom path: -ADKPath "C:\Path\To\Windows Preinstallation Environme
 
   $winpeAddOn = $candidates[0]
   Write-BuildLog "Variable winpeAddOn assigned: [$winpeAddOn]" -Level Info
-  
+
   $adkRoot = Split-Path -Path "$winpeAddOn" -Parent
   Write-BuildLog "After Split-Path - adkRoot: [$adkRoot]" -Level Info
-  
+
   if ([string]::IsNullOrWhiteSpace($adkRoot)) {
     throw "ADK Root path is empty after Split-Path. WinPE path was: '$winpeAddOn'"
   }
@@ -380,9 +391,9 @@ Or provide a custom path: -ADKPath "C:\Path\To\Windows Preinstallation Environme
   Write-BuildLog "WinPE Add-On detected: $winpeAddOn" -Level Info
 
   $Script:Config.Tools = @{
-    DISM     = [System.IO.Path]::Combine($adkRoot, "Deployment Tools\amd64\DISM\dism.exe")
-    OSCDIMG  = [System.IO.Path]::Combine($adkRoot, "Deployment Tools\amd64\Oscdimg\oscdimg.exe")
-    WinPEOCs = [System.IO.Path]::Combine($winpeAddOn, "amd64\WinPE_OCs")
+    DISM = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\DISM\dism.exe")
+    OSCDIMG = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\Oscdimg\oscdimg.exe")
+    WinPEOCs = [System.IO.Path]::Combine($winpeAddOn,"amd64\WinPE_OCs")
   }
 
   Write-BuildLog "DISM path: $($Script:Config.Tools.DISM)" -Level Info
@@ -397,7 +408,7 @@ Or provide a custom path: -ADKPath "C:\Path\To\Windows Preinstallation Environme
       throw "DISM.exe not found. Ensure Windows ADK is installed or DISM is available in PATH"
     }
   }
-  
+
   if (-not (Test-Path $Script:Config.Tools.OSCDIMG)) {
     Write-BuildLog "OSCDIMG not found at: $($Script:Config.Tools.OSCDIMG) - checking if file exists with Test-Path verbose" -Level Warning
     try {
@@ -424,7 +435,7 @@ Current ADK candidates checked:
       throw $msg
     }
   }
-  
+
   if (-not (Test-Path $Script:Config.Tools.WinPEOCs)) {
     throw "WinPE optional components folder not found: $($Script:Config.Tools.WinPEOCs)`nEnsure Windows ADK with WinPE add-on is properly installed."
   }
@@ -478,25 +489,25 @@ function Mount-SourceISO {
   if ($LASTEXITCODE -gt 7) { throw "Robocopy failed with exit code: $LASTEXITCODE" }
 
   Dismount-DiskImage -ImagePath "$SourceISO" | Out-Null
-  return [System.IO.Path]::Combine($Script:Config.Paths.ISO, "sources", "boot.wim")
+  return [System.IO.Path]::Combine($Script:Config.Paths.ISO,"sources","boot.wim")
 }
 
 function Mount-TargetWIM {
   param(
-    [Parameter(Mandatory)][string]$WimPath,
-    [ValidateSet(1,2)][int]$Index = 1
+    [Parameter(Mandatory)] [string]$WimPath,
+    [ValidateSet(1,2)] [int]$Index = 1
   )
 
   Write-BuildLog "Mounting boot.wim (Index $Index)..."
   Write-BuildLog "WIM file path: $WimPath" -Level Info
   Write-BuildLog "DISM tool: $($Script:Config.Tools.DISM)" -Level Info
   Write-BuildLog "Mount target: $($Script:Config.Paths.Mount)" -Level Info
-  
+
   # Check if WIM file exists and is accessible
   if (-not (Test-Path "$WimPath")) {
     throw "WIM file not found: $WimPath"
   }
-  
+
   # Reset WIM file attributes to remove read-only (common issue with ISO-extracted files)
   Write-BuildLog "Resetting WIM file attributes..." -Level Info
   try {
@@ -508,32 +519,32 @@ function Mount-TargetWIM {
   } catch {
     Write-BuildLog "Warning: Could not reset WIM attributes: $_" -Level Warning
   }
-  
+
   # Clean up any previous mounts at this location
   $existingMount = Get-Item "$($Script:Config.Paths.Mount)" -ErrorAction SilentlyContinue
   if ($existingMount -and (Get-ChildItem "$($Script:Config.Paths.Mount)" -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) {
     Write-BuildLog "Mount directory not empty, attempting to dismount..." -Level Warning
     & $Script:Config.Tools.DISM /Unmount-Image /MountDir:$($Script:Config.Paths.Mount) /Discard 2>&1 | Out-Null
   }
-  
+
   $output = & $Script:Config.Tools.DISM /Mount-Image /ImageFile:"$WimPath" /Index:$Index /MountDir:$($Script:Config.Paths.Mount) 2>&1
   $exitCode = $LASTEXITCODE
-  
+
   Write-BuildLog "DISM mount output (exit code $exitCode):" -Level Info
   $output | ForEach-Object { Write-BuildLog "  $_" -Level Info }
-  
-  if ($exitCode -ne 0) { 
+
+  if ($exitCode -ne 0) {
     $msg = "Failed to mount WIM (exit code $exitCode).`n`nTroubleshooting steps:`n"
     $msg += "1. Ensure PowerShell is running as Administrator (right-click Run as Administrator)`n"
     $msg += "2. Close all file explorers accessing C:\WorkRoot`n"
     $msg += "3. Ensure no previous mounts in C:\WorkRoot\Mount_WIM (DISM /unmount-image /mountdir:C:\WorkRoot\Mount_WIM /discard)`n"
     $msg += "4. Try again`n`nSee DISM log: C:\WINDOWS\Logs\DISM\dism.log"
-    throw $msg 
+    throw $msg
   }
   $Script:State.Mounted = $true
 
   foreach ($hive in "SYSTEM","SOFTWARE") {
-    $p = [System.IO.Path]::Combine($Script:Config.Paths.Mount, "Windows", "System32", "config", $hive)
+    $p = [System.IO.Path]::Combine($Script:Config.Paths.Mount,"Windows","System32","config",$hive)
     if (-not (Test-Path $p)) { throw "$hive hive missing in mounted WIM" }
   }
 
@@ -546,17 +557,17 @@ function Add-WinPE-Packages {
   $count = 0
   $ocRoot = $Script:Config.Tools.WinPEOCs
   $lang = $Script:Config.Locale
-  if (-not (Test-Path ([System.IO.Path]::Combine($ocRoot, $lang)))) { $lang = "en-us" }
+  if (-not (Test-Path ([System.IO.Path]::Combine($ocRoot,$lang)))) { $lang = "en-us" }
 
   $packages = $Script:WinPEPackages.Clone()
   if ($EnableFBWF) { $packages += "WinPE-FBWF" }
 
   foreach ($pkg in $packages) {
-    $cab = [System.IO.Path]::Combine($ocRoot, "$pkg.cab")
+    $cab = [System.IO.Path]::Combine($ocRoot,"$pkg.cab")
     if (Test-Path $cab) {
       & $Script:Config.Tools.DISM /Add-Package /Image:"$mount" /PackagePath:"$cab" /IgnoreCheck | Out-Null
       if ($LASTEXITCODE -eq 0) { $count++ } else { Write-BuildLog "Failed adding package: $pkg" -Level Warning }
-      $langCab = [System.IO.Path]::Combine($ocRoot, $lang, "${pkg}_${lang}.cab")
+      $langCab = [System.IO.Path]::Combine($ocRoot,$lang,"${pkg}_${lang}.cab")
       if (Test-Path $langCab) {
         & $Script:Config.Tools.DISM /Add-Package /Image:"$mount" /PackagePath:"$langCab" /IgnoreCheck | Out-Null
       }
@@ -573,7 +584,7 @@ function Add-DellDrivers {
   if (-not $IncludeDellDrivers) { return }
 
   Write-BuildLog "Acquiring Dell WinPE11 drivers..."
-  $dellCab = [System.IO.Path]::Combine($Script:Config.Paths.Cache, "Dell-WinPE11-Drivers.cab")
+  $dellCab = [System.IO.Path]::Combine($Script:Config.Paths.Cache,"Dell-WinPE11-Drivers.cab")
   if (-not (Test-Path $dellCab)) {
     try {
       Invoke-WebRequest -Uri $Script:AppSources.DellWinPEDrivers -OutFile $dellCab -UseBasicParsing
@@ -584,7 +595,7 @@ function Add-DellDrivers {
   }
 
   Write-BuildLog "Extracting and injecting Dell drivers..."
-  $extractDir = [System.IO.Path]::Combine($Script:Config.Paths.Temp, "DellDrivers")
+  $extractDir = [System.IO.Path]::Combine($Script:Config.Paths.Temp,"DellDrivers")
   New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
   & "$env:SystemRoot\System32\expand.exe" -F:* "$dellCab" "$extractDir" | Out-Null
 
@@ -677,8 +688,8 @@ function Ensure-7z {
 
 function Expand-7z {
   param(
-    [Parameter(Mandatory)][string]$ArchivePath,
-    [Parameter(Mandatory)][string]$Destination
+    [Parameter(Mandatory)] [string]$ArchivePath,
+    [Parameter(Mandatory)] [string]$Destination
   )
   $seven = Ensure-7z
   New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -719,7 +730,7 @@ function Get-Applications {
   Write-BuildLog "Downloading portable applications..."
 
   $cache = $Script:Config.Paths.Cache
-  $apps  = $Script:Config.Paths.Apps
+  $apps = $Script:Config.Paths.Apps
 
   # --- Open-Shell (official EXE; extract to portable layout) ---
   $osExe = Join-Path $cache "OpenShellSetup.exe"
@@ -765,7 +776,7 @@ function Get-Applications {
       Expand-7z -ArchivePath $szExe -Destination $szDest
     }
   }
-  $Script:Config.Apps.'7-Zip' = $szDest
+  $Script:Config.Apps. '7-Zip' = $szDest
   Write-BuildLog "7-Zip prepared for injection" -Level "Success"
 
   # --- IBM Semeru Java (prefer latest; fallback to prior) ---
@@ -812,9 +823,26 @@ function Get-Applications {
         Write-BuildLog "Extracting Chrome program files from offline installer..." -Level Info
         Install-ChromeFromOfflineInstaller -Installer $ChromeOfflineInstallerPath -Dest (Join-Path $chPath "App")
       } else {
-        Write-BuildLog "Chrome++ .7z does not contain chrome.exe. Provide -ChromeOfflineInstallerPath to supply Chrome's standalone installer." -Level "Warning"
-        Write-BuildLog "Skipping Chrome++ integration (no chrome.exe available)" -Level "Warning"
-        return
+        # Try downloading Chrome standalone installer as fallback
+        Write-BuildLog "Chrome++ .7z does not contain chrome.exe. Attempting to download Chrome standalone installer..." -Level "Warning"
+        $chromeInstaller = Join-Path $cache "chrome_installer.exe"
+        try {
+          if (-not (Test-Path $chromeInstaller)) {
+            Write-BuildLog "Downloading Chrome standalone installer (fallback)..." -Level Info
+            try {
+              Invoke-WebRequest -Uri $Script:AppSources.ChromeStandaloneFallback -OutFile $chromeInstaller -UseBasicParsing
+            } catch {
+              Write-BuildLog "Primary Chrome download failed, trying direct link..." -Level Warning
+              Invoke-WebRequest -Uri $Script:AppSources.ChromeStandaloneDirect -OutFile $chromeInstaller -UseBasicParsing
+            }
+          }
+          Write-BuildLog "Extracting Chrome from downloaded installer..." -Level Info
+          Install-ChromeFromOfflineInstaller -Installer $chromeInstaller -Dest (Join-Path $chPath "App")
+        } catch {
+          Write-BuildLog "Failed to download/extract Chrome: $_" -Level "Warning"
+          Write-BuildLog "Skipping Chrome++ integration (no chrome.exe available)" -Level "Warning"
+          return
+        }
       }
     }
 
@@ -874,7 +902,7 @@ function Configure-SystemRegistry {
   $softPath = Join-Path "$mount" "Windows\System32\config\SOFTWARE"
 
   reg load "HKLM\RAM_SYS" "$sysPath" | Out-Null
-  reg load "HKLM\RAM_SW"  "$softPath" | Out-Null
+  reg load "HKLM\RAM_SW" "$softPath" | Out-Null
 
   try {
     reg add "HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
@@ -883,7 +911,7 @@ function Configure-SystemRegistry {
       $javaInstall = "C:\Program Files\PortableApps\Java"
       reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "$javaInstall" /f | Out-Null
       # Append Java\bin to PATH so java.exe is callable without full path
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+', '').Trim() })
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+','').Trim() })
       if ($existingPath) {
         reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$javaInstall\bin" /f | Out-Null
       } else {
@@ -895,7 +923,7 @@ function Configure-SystemRegistry {
     # Add 7-Zip to PATH
     if ($Script:Config.Apps.ContainsKey("7-Zip")) {
       $szInstall = "C:\Program Files\PortableApps\7-Zip"
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+', '').Trim() })
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+','').Trim() })
       if ($existingPath) {
         reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$szInstall" /f | Out-Null
       } else {
@@ -916,7 +944,7 @@ function Configure-SystemRegistry {
   }
   finally {
     reg unload "HKLM\RAM_SYS" | Out-Null
-    reg unload "HKLM\RAM_SW"  | Out-Null
+    reg unload "HKLM\RAM_SW" | Out-Null
   }
 
   Write-BuildLog "Registry configured" -Level "Success"
@@ -970,7 +998,7 @@ if exist "%SystemRoot%\System32\reg.exe" (
   reg add "HKCU\Software\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0x{ACCENT} /f >nul 2>&1
 )
 exit /b 0
-'@.Replace("{WALL}", $(if ($wall) { $wall } else { "" })).Replace("{ACCENT}", $AccentColor)
+'@.Replace("{WALL}",$(if ($wall) { $wall } else { "" })).Replace("{ACCENT}",$AccentColor)
 
   Set-Content -Path (Join-Path $postDir "PostShell.cmd") -Value $post -Encoding ASCII -Force
   Write-BuildLog "PostShell.cmd created" -Level "Success"
@@ -988,7 +1016,7 @@ function Create-ChromeLauncher {
   # Runtime path: C:\Program Files\PortableApps\Chrome\Application\chrome.exe
   $buildAppsRoot = $Script:Config.Paths.Apps
   $runtimeAppsRoot = "C:\Program Files\PortableApps"
-  $chromeExeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
+  $chromeExeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot),$runtimeAppsRoot
 
   $launcher = @'
 @echo off
@@ -1027,13 +1055,13 @@ function Write-Winpeshl {
   $explorerPPPath = if ($foundEP) { $foundEP.FullName } else { $null }
 
   # Convert to runtime paths (C:\ instead of mount path) — case-insensitive replace
-  if ($openShellPath) { 
-    $openShellPath = $openShellPath -replace [regex]::Escape($mount), 'C:'
-    $launch += '"' + $openShellPath + '"' 
+  if ($openShellPath) {
+    $openShellPath = $openShellPath -replace [regex]::Escape($mount),'C:'
+    $launch += '"' + $openShellPath + '"'
   }
-  if ($IncludeExplorerPlus -and $explorerPPPath) { 
-    $explorerPPPath = $explorerPPPath -replace [regex]::Escape($mount), 'C:'
-    $launch += '"' + $explorerPPPath + '"' 
+  if ($IncludeExplorerPlus -and $explorerPPPath) {
+    $explorerPPPath = $explorerPPPath -replace [regex]::Escape($mount),'C:'
+    $launch += '"' + $explorerPPPath + '"'
   }
 
   # If Chrome launcher exists, run it after Explorer so profile lives on X:\
@@ -1079,8 +1107,23 @@ function Build-FinalISO {
   }
   $argList += @("$isoSource","$outputPath")
 
-  & $Script:Config.Tools.OSCDIMG $argList
-  if ($LASTEXITCODE -ne 0) { throw "OSCDIMG failed to create ISO (exit $LASTEXITCODE)" }
+  Write-BuildLog "Running OSCDIMG with arguments: $($argList -join ' ')" -Level Info
+  $oscdimgOutput = & $Script:Config.Tools.OSCDIMG $argList 2>&1
+  $oscdimgExit = $LASTEXITCODE
+
+  # Log OSCDIMG output for debugging
+  if ($oscdimgOutput) {
+    Write-BuildLog "OSCDIMG output:" -Level Info
+    $oscdimgOutput | ForEach-Object { Write-BuildLog "  $_" -Level Info }
+  }
+
+  if ($oscdimgExit -ne 0) {
+    $errorMsg = "OSCDIMG failed to create ISO (exit $oscdimgExit)"
+    if ($oscdimgOutput) {
+      $errorMsg += "`n`nOSCDIMG Output:`n" + ($oscdimgOutput -join "`n")
+    }
+    throw $errorMsg
+  }
 
   return $outputPath
 }
@@ -1114,7 +1157,7 @@ try {
   # Summary
   Write-BuildLog "BUILD COMPLETED SUCCESSFULLY" -Level "Success"
   Write-BuildLog "Output: $finalIso" -Level "Success"
-  Write-BuildLog ("Size: {0} MB" -f ([math]::Round((Get-Item $finalIso).Length / 1MB, 2))) -Level "Success"
+  Write-BuildLog ("Size: {0} MB" -f ([math]::Round((Get-Item $finalIso).Length / 1MB,2))) -Level "Success"
 
   Write-Host "`n=========================================" -ForegroundColor Green
   Write-Host "RAM OS Build Summary" -ForegroundColor Green
