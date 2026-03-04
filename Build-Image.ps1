@@ -77,8 +77,16 @@ param(
 
   [Parameter(Mandatory = $true)]
   [ValidateScript({
-      $resolved = try { Resolve-Path "$_" -ErrorAction Stop } catch { $null }
-      if (-not $resolved) { throw "Cannot resolve path: $_" }
+      # Accept paths that don't exist yet — they'll be created during init
+      $testPath = $_
+      if (-not (Test-Path $testPath)) {
+        # Ensure the parent or drive root exists and has enough space
+        $parent = Split-Path $testPath -Parent
+        if (-not $parent) { throw "Cannot determine parent directory for: $testPath" }
+        while ($parent -and -not (Test-Path $parent)) { $parent = Split-Path $parent -Parent }
+        if (-not $parent) { throw "No valid ancestor directory for: $testPath" }
+      }
+      $resolved = if (Test-Path $testPath) { (Resolve-Path $testPath).Path } else { [IO.Path]::GetFullPath($testPath) }
       $drive = Split-Path -Qualifier $resolved
       $free = ([System.IO.DriveInfo]::new("$drive\")).AvailableFreeSpace / 1GB
       if ($free -lt 20) { throw "Insufficient space on $drive ($([math]::Round($free,2)) GB, need 20+)" }
@@ -191,8 +199,12 @@ $Script:AppSources = @{
   # Dell WinPE 11 driver pack A08 (Dec 23, 2025)
   DellWinPEDrivers    = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab"
 
-  # Minimal 7-zip standalone extractor
+  # Minimal 7-zip standalone extractor (build-time only)
   SevenZipMini        = "https://www.7-zip.org/a/7zr.exe"
+
+  # Full 7-Zip portable (console + GUI) for injection into the image
+  SevenZipExtra       = "https://www.7-zip.org/a/7z2408-extra.7z"
+  SevenZipFull        = "https://www.7-zip.org/a/7z2408-x64.exe"
 }
 
 # Valid WinPE OCs per MS docs; language packs added when present
@@ -233,6 +245,9 @@ function Write-BuildLog {
 # ============================================
 function Initialize-BuildEnvironment {
   Write-BuildLog "Initializing RAM OS Builder..."
+
+  # Ensure WorkRoot exists (may have been a new path accepted by validation)
+  if (-not (Test-Path $WorkRoot)) { New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null }
 
   $Script:Config.Paths = @{
     Root   = (Resolve-Path "$WorkRoot").Path
@@ -479,14 +494,50 @@ function Get-Applications {
   }
   $Script:Config.Apps.OpenShell = $osDest
 
+  # --- 7-Zip (full portable for the image) ---
+  Write-BuildLog "Downloading 7-Zip portable..."
+  $szDest = Join-Path $apps "7-Zip"
+  New-Item -ItemType Directory -Force -Path $szDest | Out-Null
+  $szExe = Join-Path $cache "7z-full.exe"
+  if (-not (Test-Path $szExe)) {
+    try {
+      Invoke-WebRequest -Uri $Script:AppSources.SevenZipFull -OutFile $szExe -UseBasicParsing
+    } catch {
+      Write-BuildLog "Failed to download 7-Zip full installer, trying extra archive..." -Level Warning
+      $szExtra = Join-Path $cache "7z-extra.7z"
+      Invoke-WebRequest -Uri $Script:AppSources.SevenZipExtra -OutFile $szExtra -UseBasicParsing
+      Expand-7z -ArchivePath $szExtra -Destination $szDest
+      $szExe = $null
+    }
+  }
+  if ($szExe -and (Test-Path $szExe)) {
+    # 7-Zip installer supports /D= for target directory and /S for silent
+    try {
+      Start-Process -FilePath $szExe -ArgumentList "/S /D=$szDest" -Wait -WindowStyle Hidden -ErrorAction Stop
+    } catch {
+      Expand-7z -ArchivePath $szExe -Destination $szDest
+    }
+  }
+  $Script:Config.Apps.'7-Zip' = $szDest
+  Write-BuildLog "7-Zip prepared for injection" -Level "Success"
+
   # --- IBM Semeru Java (prefer latest; fallback to prior) ---
   $jvZip = Join-Path $cache "Semeru.zip"
   if (-not (Test-Path $jvZip)) {
     try { Invoke-WebRequest -Uri $Script:AppSources.SemeruPrimary -OutFile $jvZip -UseBasicParsing }
     catch { Invoke-WebRequest -Uri $Script:AppSources.SemeruFallback -OutFile $jvZip -UseBasicParsing }
   }
-  Expand-Archive $jvZip (Join-Path $apps "Java") -Force
-  $Script:Config.Apps.Java = Join-Path $apps "Java"
+  $javaRoot = Join-Path $apps "Java"
+  Expand-Archive $jvZip $javaRoot -Force
+  # Flatten nested folder: Semeru ZIPs extract to e.g. Java\jdk8u482-b08\...
+  $nested = Get-ChildItem -Path $javaRoot -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'bin') }
+  if ($nested -and $nested.Count -eq 1) {
+    $nestedPath = $nested[0].FullName
+    Write-BuildLog "Flattening nested Java directory: $($nested[0].Name)"
+    Get-ChildItem -Path $nestedPath -Force | Move-Item -Destination $javaRoot -Force
+    Remove-Item $nestedPath -Force -ErrorAction SilentlyContinue
+  }
+  $Script:Config.Apps.Java = $javaRoot
 
   # --- Explorer++ portable ---
   if ($IncludeExplorerPlus) {
@@ -509,9 +560,15 @@ function Get-Applications {
     Expand-7z -ArchivePath $cp7z -Destination $chPath
 
     # If chrome.exe not found, try user-provided offline installer
-    if (-not (Find-ExeUnder -Root $chPath -ExeName 'chrome.exe') -and $ChromeOfflineInstallerPath) {
-      Write-BuildLog "Extracting Chrome program files from offline installer..." -Level Info
-      Install-ChromeFromOfflineInstaller -Installer $ChromeOfflineInstallerPath -Dest (Join-Path $chPath "App")
+    if (-not (Find-ExeUnder -Root $chPath -ExeName 'chrome.exe')) {
+      if ($ChromeOfflineInstallerPath) {
+        Write-BuildLog "Extracting Chrome program files from offline installer..." -Level Info
+        Install-ChromeFromOfflineInstaller -Installer $ChromeOfflineInstallerPath -Dest (Join-Path $chPath "App")
+      } else {
+        Write-BuildLog "Chrome++ .7z does not contain chrome.exe. Provide -ChromeOfflineInstallerPath to supply Chrome's standalone installer." -Level "Warning"
+        Write-BuildLog "Skipping Chrome++ integration (no chrome.exe available)" -Level "Warning"
+        return
+      }
     }
 
     # Validate Chrome++ co-location (version.dll next to chrome.exe)
@@ -576,7 +633,28 @@ function Configure-SystemRegistry {
     reg add "HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
 
     if ($Script:Config.Apps.ContainsKey("Java")) {
-      reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "C:\Program Files\PortableApps\Java" /f | Out-Null
+      $javaInstall = "C:\Program Files\PortableApps\Java"
+      reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "$javaInstall" /f | Out-Null
+      # Append Java\bin to PATH so java.exe is callable without full path
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Select-String "REG_" | ForEach-Object { ($_ -split "\s{2,}")[3] })
+      if ($existingPath) {
+        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$javaInstall\bin" /f | Out-Null
+      } else {
+        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "%SystemRoot%\System32;%SystemRoot%;$javaInstall\bin" /f | Out-Null
+      }
+      Write-BuildLog "JAVA_HOME and PATH configured for Java" -Level "Success"
+    }
+
+    # Add 7-Zip to PATH
+    if ($Script:Config.Apps.ContainsKey("7-Zip")) {
+      $szInstall = "C:\Program Files\PortableApps\7-Zip"
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Select-String "REG_" | ForEach-Object { ($_ -split "\s{2,}")[3] })
+      if ($existingPath) {
+        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$szInstall" /f | Out-Null
+      } else {
+        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "%SystemRoot%\System32;%SystemRoot%;$szInstall" /f | Out-Null
+      }
+      Write-BuildLog "7-Zip added to PATH" -Level "Success"
     }
 
     if ($IncludeExplorerPlus) {
@@ -609,6 +687,14 @@ echo ==========================================
 echo   RAM OS - Initializing WinPE
 echo ==========================================
 wpeinit
+
+REM Initialize network (wired adapters via DHCP)
+wpeutil InitializeNetwork
+wpeutil WaitForNetwork
+
+REM Disable Windows Firewall to avoid blocking in WinPE
+wpeutil DisableFirewall
+
 exit /b 0
 '@
   Set-Content -Path (Join-Path "$mount" "Windows\System32\StartNet.cmd") -Value $content -Force -Encoding ASCII
@@ -631,11 +717,13 @@ if exist "%SystemRoot%\System32\reg.exe" (
     reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "{WALL}" /f
     rundll32.exe user32.dll,UpdatePerUserSystemParameters
   )
-  REM Accent color visibility (best-effort)
+  REM Accent color (DWM colorization)
   reg add "HKCU\Software\Microsoft\Windows\DWM" /v ColorPrevalence /t REG_DWORD /d 1 /f >nul 2>&1
+  reg add "HKCU\Software\Microsoft\Windows\DWM" /v AccentColor /t REG_DWORD /d 0x{ACCENT} /f >nul 2>&1
+  reg add "HKCU\Software\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0x{ACCENT} /f >nul 2>&1
 )
 exit /b 0
-'@.Replace("{WALL}", ($wall ? $wall : ""))
+'@.Replace("{WALL}", ($wall ? $wall : "")).Replace("{ACCENT}", $AccentColor)
 
   Set-Content -Path (Join-Path $postDir "PostShell.cmd") -Value $post -Encoding ASCII -Force
   Write-BuildLog "PostShell.cmd created" -Level "Success"
@@ -648,7 +736,13 @@ function Create-ChromeLauncher {
   $tools = Join-Path $mount "Windows\System32\RAMOS"
   New-Item -ItemType Directory -Force -Path $tools | Out-Null
 
-  $chromeExe = $Script:Config.Apps.ChromeExe
+  # Convert build-time chrome.exe path to runtime path inside the WIM
+  # Build path:   D:\Build\Apps\Chrome\Application\chrome.exe
+  # Runtime path: C:\Program Files\PortableApps\Chrome\Application\chrome.exe
+  $buildAppsRoot = $Script:Config.Paths.Apps
+  $runtimeAppsRoot = "C:\Program Files\PortableApps"
+  $chromeExeRuntime = $Script:Config.Apps.ChromeExe.Replace($buildAppsRoot, $runtimeAppsRoot)
+
   $launcher = @'
 @echo off
 set "PROFILE=X:\ChromeProfile"
@@ -657,7 +751,7 @@ if not exist "%PROFILE%" mkdir "%PROFILE%"
 if not exist "%CACHE%" mkdir "%CACHE%"
 start "" "{CHROME}" --user-data-dir="%PROFILE%" --disk-cache-dir="%CACHE%" --no-first-run --no-default-browser-check
 exit /b 0
-'@.Replace('{CHROME}',$chromeExe)
+'@.Replace('{CHROME}',$chromeExeRuntime)
 
   Set-Content -Path (Join-Path $tools "StartChrome.cmd") -Value $launcher -Encoding ASCII -Force
 }
@@ -773,6 +867,9 @@ try {
   Write-Host "Drivers (INF count): $($Script:Config.Stats.DriversAdded)" -ForegroundColor Gray
   if ($EnableFBWF) { Write-Host "FBWF: OC added (enablement usually requires reboot; not needed for RAM operation)" -ForegroundColor Gray }
   Write-Host "`nFeatures:" -ForegroundColor Cyan
+  Write-Host "  [+] 7-Zip (injected + on PATH)" -ForegroundColor Gray
+  Write-Host "  [+] IBM Semeru Java 8 (JAVA_HOME + on PATH)" -ForegroundColor Gray
+  Write-Host "  [+] Open-Shell Start Menu" -ForegroundColor Gray
   if ($UseChromePlus) { Write-Host "  [+] Chrome++ (Chrome Plus) with portable validation" -ForegroundColor Gray }
   if ($IncludeExplorerPlus) { Write-Host "  [+] Explorer++ File Manager" -ForegroundColor Gray }
   if ($IncludeDellDrivers) { Write-Host "  [+] Dell WinPE11 Drivers (INF injected)" -ForegroundColor Gray }

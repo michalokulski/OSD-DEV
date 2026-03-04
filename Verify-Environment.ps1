@@ -19,7 +19,7 @@ $errors = @()
 # ====================================
 # SYSTEM CHECKS
 # ====================================
-Write-Host "[1/6] System Requirements" -ForegroundColor Cyan
+Write-Host "[1/7] System Requirements" -ForegroundColor Cyan
 
 # Windows Version
 $osVersion = [System.Environment]::OSVersion.Version
@@ -73,7 +73,7 @@ Write-Host ""
 # ====================================
 # REQUIRED SCRIPTS
 # ====================================
-Write-Host "[2/6] Required Scripts" -ForegroundColor Cyan
+Write-Host "[2/7] Required Scripts" -ForegroundColor Cyan
 
 $scripts = @(
     'Build-Image.ps1',
@@ -100,15 +100,15 @@ Write-Host ""
 # ====================================
 # POWERSHELL MODULES & DISM TOOLS
 # ====================================
-Write-Host "[3/6] PowerShell Modules & DISM" -ForegroundColor Cyan
+Write-Host "[3/7] PowerShell Modules & DISM" -ForegroundColor Cyan
 
 # DISM
 $dismPath = Get-Command dism.exe -ErrorAction SilentlyContinue
 if ($dismPath) {
-    Write-Host "  OK  DISM Tools: Available" -ForegroundColor Green
+    Write-Host "  OK  DISM Tools: Available ($($dismPath.Source))" -ForegroundColor Green
 }
 else {
-    Write-Host "  ERR DISM Tools: Not found (Windows ADK may be needed)" -ForegroundColor Red
+    Write-Host "  ERR DISM Tools: Not found (Windows ADK required)" -ForegroundColor Red
     $errors += "DISM not available"
     $allGood = $false
 }
@@ -123,12 +123,52 @@ else {
     $warnings += "Mount-WindowsImage cmdlet missing"
 }
 
+# Windows ADK WinPE add-on
+$adkCandidates = @(
+    "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment",
+    "${env:ProgramFiles(x86)}\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment"
+)
+$adkFound = $adkCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($adkFound) {
+    Write-Host "  OK  WinPE Add-on: $adkFound" -ForegroundColor Green
+    $adkRoot = Split-Path $adkFound
+
+    # OSCDIMG
+    $oscdimgPath = Join-Path $adkRoot "Deployment Tools\AMD64\Oscdimg\oscdimg.exe"
+    if (Test-Path $oscdimgPath) {
+        Write-Host "  OK  OSCDIMG: Available" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  ERR OSCDIMG: Not found at $oscdimgPath" -ForegroundColor Red
+        $errors += "OSCDIMG not found (required for ISO creation)"
+        $allGood = $false
+    }
+
+    # WinPE OCs folder
+    $ocPath = Join-Path $adkFound "amd64\WinPE_OCs"
+    if (Test-Path $ocPath) {
+        $ocCount = (Get-ChildItem -Path $ocPath -Filter "*.cab" | Measure-Object).Count
+        Write-Host "  OK  WinPE OCs: $ocCount packages available" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  ERR WinPE OCs folder not found: $ocPath" -ForegroundColor Red
+        $errors += "WinPE optional components missing"
+        $allGood = $false
+    }
+}
+else {
+    Write-Host "  ERR WinPE Add-on: NOT FOUND" -ForegroundColor Red
+    Write-Host "       Install: https://aka.ms/adk and the WinPE add-on" -ForegroundColor Gray
+    $errors += "Windows ADK WinPE add-on not installed"
+    $allGood = $false
+}
+
 Write-Host ""
 
 # ====================================
 # STALE MOUNT CHECK
 # ====================================
-Write-Host "[4/6] Stale Mount Check" -ForegroundColor Cyan
+Write-Host "[4/7] Stale Mount Check" -ForegroundColor Cyan
 
 $staleMounts = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue
 if ($staleMounts) {
@@ -147,7 +187,7 @@ Write-Host ""
 # ====================================
 # NETWORK & DOWNLOAD URL REACHABILITY
 # ====================================
-Write-Host "[5/6] Network & Download URLs" -ForegroundColor Cyan
+Write-Host "[5/7] Network & Download URLs" -ForegroundColor Cyan
 
 # Basic internet check
 try {
@@ -165,21 +205,21 @@ catch {
     $warnings += "Internet check failed"
 }
 
-# Test critical download URLs
+# Test critical download URLs used by Build-Image.ps1
 $urls = @(
-    "https://github.com",
-    "https://dl.google.com",
-    "https://www.7-zip.org"
+    @{ Name = "GitHub (Open-Shell, Chrome++, Explorer++, Semeru)"; Url = "https://github.com" },
+    @{ Name = "Dell Drivers"; Url = "https://downloads.dell.com" },
+    @{ Name = "7-Zip"; Url = "https://www.7-zip.org" }
 )
 
-foreach ($url in $urls) {
+foreach ($entry in $urls) {
     try {
-        $response = Invoke-WebRequest -Uri $url -Method Head -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
-        Write-Host "  OK  $url: Reachable" -ForegroundColor Green
+        Invoke-WebRequest -Uri $entry.Url -Method Head -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop | Out-Null
+        Write-Host "  OK  $($entry.Name): Reachable" -ForegroundColor Green
     }
     catch {
-        Write-Host "  WARN $url: NOT reachable" -ForegroundColor Yellow
-        $warnings += "$url not reachable"
+        Write-Host "  WARN $($entry.Name) ($($entry.Url)): NOT reachable" -ForegroundColor Yellow
+        $warnings += "$($entry.Name) not reachable"
     }
 }
 
@@ -188,7 +228,7 @@ Write-Host ""
 # ====================================
 # CONFIGURATION PATHS
 # ====================================
-Write-Host "[6/6] Configuration Paths" -ForegroundColor Cyan
+Write-Host "[6/7] Configuration Paths" -ForegroundColor Cyan
 
 $defaultWorkRoot = "C:\Build"
 if (Test-Path $defaultWorkRoot) {
@@ -196,7 +236,7 @@ if (Test-Path $defaultWorkRoot) {
     $iso = Get-ChildItem "$defaultWorkRoot\Output\*.iso" -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($iso) {
         $isoSizeGB = $iso.Length / 1GB
-        Write-Host "  OK  ISO: $($iso.Name) ($([math]::Round($isoSizeGB, 2)) GB)" -ForegroundColor Green
+        Write-Host "  OK  Last ISO: $($iso.Name) ($([math]::Round($isoSizeGB, 2)) GB)" -ForegroundColor Green
     }
 }
 else {
@@ -206,8 +246,22 @@ else {
 Write-Host ""
 
 # ====================================
+# BUILD-IMAGE.PS1 PARAMETER HINTS
+# ====================================
+Write-Host "[7/7] Build Script Reminders" -ForegroundColor Cyan
+
+Write-Host "  INFO Required params: -SourceISO <path> -WorkRoot <path>" -ForegroundColor Gray
+Write-Host "  INFO Chrome++: Use -UseChromePlus AND -ChromeOfflineInstallerPath <path>" -ForegroundColor Gray
+Write-Host "       (Chrome++ .7z does NOT include chrome.exe; offline installer required)" -ForegroundColor Gray
+Write-Host "  INFO Java: IBM Semeru 8 downloaded; JAVA_HOME and PATH auto-configured" -ForegroundColor Gray
+Write-Host "  INFO Network: StartNet.cmd runs wpeinit + wpeutil InitializeNetwork" -ForegroundColor Gray
+
+Write-Host ""
+
+# ====================================
 # EXECUTION PERMISSIONS
 # ====================================
+Write-Host ""
 Write-Host "[Exec Policy]" -ForegroundColor Cyan
 $policy = Get-ExecutionPolicy -Scope Process
 if ($policy -eq 'Undefined') { $policy = Get-ExecutionPolicy }
