@@ -173,12 +173,12 @@ ${Script:Config} = @{
 #TODO: Fix subject of Chrome 
 # Add 7-zip
 ${Script:AppSources} = @{
-  OpenShell = "https://github.com/Open-Shell/Open-Shell-Menu/releases/download/4.4.191/OpenShell-4.4.191-Portable.zip"
+  OpenShell = "https://github.com/Open-Shell/Open-Shell-Menu/releases/download/4.4.191/OpenShell-4.4.191-Portable.zip" # https://github.com/Open-Shell/Open-Shell-Menu
   Semeru = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u472-b08_openj9-0.56.0/ibm-semeru-open-jdk_x64_windows_8u472b08_openj9-0.56.0-portable.zip"
-  ExplorerPlusPlus = "https://github.com/derceg/explorer-plus-plus/releases/download/1.4.0/explorerpp_x64.zip"
-  ChromePlus = "https://github.com/Bush2021/chrome_plus/releases/download/1.15.1/Chrome++_v1.15.1_x86_x64_arm64.7z"
-  ChromePortable = "https://dl.google.com/release2/chrome/nuloamky47wcog6772kpqu2zyu_145.0.7632.160/145.0.7632.160_chrome_installer_uncompressed.exe" # Note: This is the online installer, not a true portable version. Will attempt silent extraction.
-  DellWinPEDrivers = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab"
+  ExplorerPlusPlus = "https://github.com/derceg/explorerplusplus/releases/download/version-1.4.0/explorerpp_x64.zip" # https://github.com/derceg/explorerplusplus
+  ChromePlus = "https://github.com/Bush2021/chrome_plus/releases/download/1.15.1/Chrome++_v1.15.1_x86_x64_arm64.7z" # Please make sure to put version.dll in the same directory as chrome.exe. It's recommended to download the Chrome offline installer package, extract it twice to get the Chrome program files, and then place them in the App folder.
+  ChromePortable = "https://dl.google.com/release2/chrome/nuloamky47wcog6772kpqu2zyu_145.0.7632.160/145.0.7632.160_chrome_installer_uncompressed.exe" # https://github.com/Bush2021/chrome_installer
+  DellWinPEDrivers = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab" # https://www.dell.com/support/kbdoc/en-us/000211541/winpe-11-driver-pack
   SevenZip = "https://www.7-zip.org/a/7z2201-x64.exe"
 }
 
