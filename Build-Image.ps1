@@ -181,10 +181,8 @@ $Script:Config = @{
 
 # Latest stable sources (with fallbacks where useful)
 $Script:AppSources = @{
-  # Open-Shell official (4.4.196). We extract from the installer to achieve a portable layout.
-  OpenShellExe = "https://github.com/Open-Shell/Open-Shell-Menu/releases/download/v4.4.196/OpenShellSetup_4_4_196.exe"
-  # Fallback mirror (in case GitHub throttles)
-  OpenShellExeMirror = "https://sourceforge.net/projects/open-shell.mirror/files/v4.4.196/OpenShellSetup_4_4_196.exe/download"
+  # WinXShell - lightweight shell for WinPE (portable, no installation needed)
+  WinXShell = "https://www.theoven.org/download/file.php?id=129&sid=a690ad357e3aaa6c4ddc557b07396bae"
 
   # IBM Semeru (prefer latest 8u482; fallback to previously-used 8u472)
   SemeruPrimary = "https://github.com/ibmruntimes/semeru8-binaries/releases/download/jdk8u482-b08_openj9-0.57.0/ibm-semeru-open-jdk_x64_windows_8u482b08_openj9-0.57.0.zip"
@@ -732,25 +730,14 @@ function Get-Applications {
   $cache = $Script:Config.Paths.Cache
   $apps = $Script:Config.Paths.Apps
 
-  # --- Open-Shell (official EXE; extract to portable layout) ---
-  $osExe = Join-Path $cache "OpenShellSetup.exe"
-  if (-not (Test-Path $osExe)) {
-    try { Invoke-WebRequest -Uri $Script:AppSources.OpenShellExe -OutFile $osExe -UseBasicParsing }
-    catch { Invoke-WebRequest -Uri $Script:AppSources.OpenShellExeMirror -OutFile $osExe -UseBasicParsing }
+  # --- WinXShell (portable shell for WinPE) ---
+  $wxZip = Join-Path $cache "WinXShell.7z"
+  if (-not (Test-Path $wxZip)) {
+    Invoke-WebRequest -Uri $Script:AppSources.WinXShell -OutFile $wxZip -UseBasicParsing
   }
-  $osDest = Join-Path $apps "OpenShell"
-  New-Item -ItemType Directory -Force -Path $osDest | Out-Null
-  # Use 7z extraction first (reliable for NSIS/Inno Setup EXEs); fall back to installer /extract
-  try {
-    Expand-7z -ArchivePath $osExe -Destination $osDest
-  } catch {
-    try {
-      Start-Process -FilePath $osExe -ArgumentList "/extract=`"$osDest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
-    } catch {
-      Write-BuildLog "Could not extract Open-Shell installer: $_" -Level "Warning"
-    }
-  }
-  $Script:Config.Apps.OpenShell = $osDest
+  $wxDest = Join-Path $apps "WinXShell"
+  Expand-7z -ArchivePath $wxZip -Destination $wxDest
+  $Script:Config.Apps.WinXShell = $wxDest
 
   # --- 7-Zip (full portable for the image) ---
   Write-BuildLog "Downloading 7-Zip portable..."
@@ -819,9 +806,10 @@ function Get-Applications {
 
     # If chrome.exe not found, try user-provided offline installer
     if (-not (Find-ExeUnder -Root $chPath -ExeName 'chrome.exe')) {
+      $chromeAppDir = Join-Path $chPath "Chrome-bin"
       if ($ChromeOfflineInstallerPath) {
         Write-BuildLog "Extracting Chrome program files from offline installer..." -Level Info
-        Install-ChromeFromOfflineInstaller -Installer $ChromeOfflineInstallerPath -Dest (Join-Path $chPath "App")
+        Install-ChromeFromOfflineInstaller -Installer $ChromeOfflineInstallerPath -Dest $chromeAppDir
       } else {
         # Try downloading Chrome standalone installer as fallback
         Write-BuildLog "Chrome++ .7z does not contain chrome.exe. Attempting to download Chrome standalone installer..." -Level "Warning"
@@ -837,11 +825,22 @@ function Get-Applications {
             }
           }
           Write-BuildLog "Extracting Chrome from downloaded installer..." -Level Info
-          Install-ChromeFromOfflineInstaller -Installer $chromeInstaller -Dest (Join-Path $chPath "App")
+          Install-ChromeFromOfflineInstaller -Installer $chromeInstaller -Dest $chromeAppDir
         } catch {
           Write-BuildLog "Failed to download/extract Chrome: $_" -Level "Warning"
           Write-BuildLog "Skipping Chrome++ integration (no chrome.exe available)" -Level "Warning"
           return
+        }
+      }
+      
+      # Copy Chrome++ version.dll to the Chrome binary directory
+      $versionDllSource = Find-ExeUnder -Root $chPath -ExeName 'version.dll'
+      if ($versionDllSource) {
+        $chromeExeFound = Find-ExeUnder -Root $chromeAppDir -ExeName 'chrome.exe'
+        if ($chromeExeFound) {
+          $versionDllDest = Join-Path $chromeExeFound.Directory.FullName 'version.dll'
+          Copy-Item $versionDllSource.FullName $versionDllDest -Force
+          Write-BuildLog "Chrome++ version.dll copied next to chrome.exe" -Level Info
         }
       }
     }
@@ -1049,15 +1048,15 @@ function Write-Winpeshl {
 
   # Check in the mounted WIM, not the running system (PS 5.1 compatible — no ?. operator)
   $mountedBase = Join-Path $mount "Program Files\PortableApps"
-  $foundOS = Find-ExeUnder -Root (Join-Path $mountedBase "OpenShell") -ExeName "StartMenu.exe"
-  $openShellPath = if ($foundOS) { $foundOS.FullName } else { $null }
+  $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell.exe"
+  $winxShellPath = if ($foundWX) { $foundWX.FullName } else { $null }
   $foundEP = Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe"
   $explorerPPPath = if ($foundEP) { $foundEP.FullName } else { $null }
 
   # Convert to runtime paths (C:\ instead of mount path) — case-insensitive replace
-  if ($openShellPath) {
-    $openShellPath = $openShellPath -replace [regex]::Escape($mount),'C:'
-    $launch += '"' + $openShellPath + '"'
+  if ($winxShellPath) {
+    $winxShellPath = $winxShellPath -replace [regex]::Escape($mount),'C:'
+    $launch += '"' + $winxShellPath + '"'
   }
   if ($IncludeExplorerPlus -and $explorerPPPath) {
     $explorerPPPath = $explorerPPPath -replace [regex]::Escape($mount),'C:'
@@ -1170,7 +1169,7 @@ try {
   Write-Host "`nFeatures:" -ForegroundColor Cyan
   Write-Host "  [+] 7-Zip (injected + on PATH)" -ForegroundColor Gray
   Write-Host "  [+] IBM Semeru Java 8 (JAVA_HOME + on PATH)" -ForegroundColor Gray
-  Write-Host "  [+] Open-Shell Start Menu" -ForegroundColor Gray
+  Write-Host "  [+] WinXShell (lightweight WinPE shell)" -ForegroundColor Gray
   if ($UseChromePlus) { Write-Host "  [+] Chrome++ (Chrome Plus) with portable validation" -ForegroundColor Gray }
   if ($IncludeExplorerPlus) { Write-Host "  [+] Explorer++ File Manager" -ForegroundColor Gray }
   if ($IncludeDellDrivers) { Write-Host "  [+] Dell WinPE11 Drivers (INF injected)" -ForegroundColor Gray }
