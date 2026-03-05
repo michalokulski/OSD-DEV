@@ -1339,38 +1339,41 @@ function Create-StartupScript {
 
   $wifiEnabled = ($UseWinRE -or $IncludeWiFi)
 
-  # Base block: wpeinit + wired network init
+  # Find WinXShell runtime path (C:\ based) from what was injected into the WIM
+  $mountedBase  = Join-Path $mount 'Program Files\PortableApps'
+  $wxItem       = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell_x64.exe'
+  if (-not $wxItem) { $wxItem = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell.exe' }
+  $wxRuntime    = if ($wxItem) { $wxItem.FullName -replace [regex]::Escape($mount), 'C:' } else { $null }
+
+  # ── OSD-inspired pattern ─────────────────────────────────────────────
+  # startnet.cmd IS the entry point: wpeinit → network → WiFi → shell
+  # WinXShell is launched at the END (start /wait) so all init is done first.
+  # No winpeshl.ini needed — WinPE defaults to cmd.exe → startnet.cmd.
   $content = @'
-@echo off
-echo ==========================================
-echo   RAM OS - Initializing WinPE
-echo ==========================================
+@ECHO OFF
 wpeinit
 
-REM Initialize wired network (DHCP) and disable firewall
+REM Initialize wired network
 wpeutil InitializeNetwork
-wpeutil WaitForNetwork
 wpeutil DisableFirewall
 '@
 
   if ($wifiEnabled) {
-    # OSD Initialize-OSDCloudStartnet -WirelessConnect handles the full WiFi flow:
-    #   1. Checks if already online (Test-WebConnection google.com) — skips if wired is up
-    #   2. Verifies dmcmnutils.dll is present (guard for injected DLLs)
-    #   3. Starts WlanSvc if not running
-    #   4. Detects WiFi adapter via Get-SmbClientNetworkInterface
-    #   5. Checks HP UEFI for pre-provisioned WiFi profile (bonus for HP fleet)
-    #   6. Launches WirelessConnect.exe (X:\Windows\WirelessConnect.exe) for GUI SSID selection
-    #      OR uses a saved wifiProfile.xml for unattended connection
-    # This mirrors exactly what the user's working Edit-OSDCloudWinPE code produced.
     $content += @'
 
-REM === WiFi Initialization ===
-REM OSD Initialize-OSDCloudStartnet: checks connectivity, starts WlanSvc,
-REM detects adapter, then launches WirelessConnect.exe for SSID selection.
-REM Falls back to inline WlanSvc start if OSD module is not in image.
-PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet -WirelessConnect } else { net start WlanSvc; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
+REM === WiFi Initialization (OSD) ===
+PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet -WirelessConnect } else { net start WlanSvc 2>nul; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
 '@
+  }
+
+  # Launch WinXShell (blocking — when WinXShell exits, WinPE shuts down)
+  if ($wxRuntime) {
+    $content += "`r`n`r`nREM === Start Shell ===`r`nstart /wait `"WinXShell`" `"$wxRuntime`"`r`n"
+    Write-BuildLog "  StartNet.cmd will launch: $wxRuntime" -Level Info
+  } else {
+    # WinXShell not found — fall back to cmd so the image still boots
+    $content += "`r`n`r`nREM === Shell (WinXShell not found, falling back to cmd) ===`r`ncmd.exe /k`r`n"
+    Write-BuildLog "  WinXShell not found in WIM — StartNet.cmd falls back to cmd.exe" -Level Warning
   }
 
   $content += @'
@@ -1378,8 +1381,8 @@ PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDC
 exit /b 0
 '@
 
-  Set-Content -Path (Join-Path "$mount" "Windows\System32\StartNet.cmd") -Value $content -Force -Encoding ASCII
-  Write-BuildLog "StartNet.cmd created$(if ($wifiEnabled) { ' (WiFi: Initialize-OSDCloudStartnet -WirelessConnect)' })" -Level "Success"
+  Set-Content -Path (Join-Path $mount 'Windows\System32\StartNet.cmd') -Value $content -Force -Encoding ASCII
+  Write-BuildLog "StartNet.cmd created$(if ($wifiEnabled) { ' (WiFi: Initialize-OSDCloudStartnet -WirelessConnect)' })" -Level 'Success'
 }
 
 function Create-PostShellScript {
@@ -1438,48 +1441,16 @@ exit /b 0
 }
 
 function Write-Winpeshl {
-  Write-BuildLog "Writing winpeshl.ini..."
-  $mount = $Script:Config.Paths.Mount
-  $iniPath = Join-Path $mount "Windows\System32\winpeshl.ini"
-
-  $launch = @("[LaunchApps]")
-
-  # Shell: WinXShell (primary) + Explorer++ (optional file manager); no Microsoft explorer.exe
-  $mountedBase = Join-Path $mount "Program Files\PortableApps"
-  # WinXShell ships as WinXShell_x64.exe (not WinXShell.exe)
-  $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell_x64.exe"
-  if (-not $foundWX) { $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell.exe" }  # fallback for alternate builds
-  $winxShellPath = if ($foundWX) { $foundWX.FullName } else { $null }
-  $foundEP = Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe"
-  $explorerPPPath = if ($foundEP) { $foundEP.FullName } else { $null }
-
-  # Primary shell: WinXShell
-  if ($winxShellPath) {
-    $winxShellPath = $winxShellPath -replace [regex]::Escape($mount),'C:'
-    $launch += '"' + $winxShellPath + '"'
-    Write-BuildLog "WinXShell set as primary shell" -Level "Success"
-  } else {
-    Write-BuildLog "WinXShell not found in WIM — falling back to cmd.exe shell" -Level "Warning"
-    $launch += 'cmd.exe'
+  # OSD pattern: startnet.cmd launches WinXShell at the end — no winpeshl.ini needed.
+  # Removing winpeshl.ini (or leaving it absent) causes WinPE to default to
+  # cmd.exe /k startnet.cmd, which is exactly what we want.
+  $mount   = $Script:Config.Paths.Mount
+  $iniPath = Join-Path $mount 'Windows\System32\winpeshl.ini'
+  if (Test-Path $iniPath) {
+    Remove-Item $iniPath -Force
+    Write-BuildLog "winpeshl.ini removed — WinPE will use cmd.exe → StartNet.cmd (OSD pattern)" -Level Info
   }
-
-  # File manager: Explorer++ (optional)
-  if ($IncludeExplorerPlus -and $explorerPPPath) {
-    $explorerPPPath = $explorerPPPath -replace [regex]::Escape($mount),'C:'
-    $launch += '"' + $explorerPPPath + '"'
-    Write-BuildLog "Explorer++ added as file manager" -Level "Success"
-  }
-
-  # If Chrome launcher exists, run it after Explorer so profile lives on X:\
-  $chromeLauncher = "%SystemRoot%\System32\RAMOS\StartChrome.cmd"
-  if (Test-Path (Join-Path $mount "Windows\System32\RAMOS\StartChrome.cmd")) {
-    $launch += '"' + $chromeLauncher + '"'
-  }
-
-  $launch += '"%SystemRoot%\System32\RAMOS\PostShell.cmd"'
-
-  Set-Content -Path $iniPath -Value ($launch -join "`r`n") -Encoding ASCII -Force
-  Write-BuildLog "winpeshl.ini written" -Level "Success"
+  Write-BuildLog "winpeshl.ini: no-op (shell launched from StartNet.cmd)" -Level 'Success'
 }
 
 # ============================================
