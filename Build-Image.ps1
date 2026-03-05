@@ -463,92 +463,207 @@ function Invoke-Cleanup {
 # ============================================
 
 # Locate the machine's own WinRE WIM (used when -UseWinRE is specified).
-# Four-tier search:
-#   1. Well-known accessible paths (standard install locations)
-#   2. ReAgent.xml relative path scanned across all accessible drive letters
-#   3. reagentc /info — \\?\GLOBALROOT device paths work directly with DISM
-#   4. Broad scan of all accessible drives
+#
+# Five-tier search strategy:
+#   1. Well-known drive-letter paths (standard installs, in-place upgrades)
+#   2. ReAgent.xml relative path + scan all lettered drives
+#   3. Recovery partition mount — the typical case on modern Windows 10/11:
+#      WinRE lives on a hidden GPT Recovery partition (type de94bba4-...) with no
+#      drive letter. We find it with Get-Partition, temporarily assign a drive letter
+#      via Add-PartitionAccessPath, copy the WIM to the work folder, then clean up.
+#   4. reagentc /info — parses \\?\GLOBALROOT device paths when reagentc is available
+#   5. Broad scan of all accessible drive roots (last resort)
 function Get-WinRESource {
   Write-BuildLog "Locating local winre.wim..."
 
-  # Tier 1: well-known accessible paths (covers most in-place upgrade and MBR/GPT configs)
-  $candidates = @(
+  # ── Tier 1: well-known accessible drive-letter paths ─────────────────────
+  foreach ($c in @(
     "$env:SystemRoot\System32\Recovery\Winre.wim",
     "$env:SystemDrive\Recovery\WindowsRE\Winre.wim",
     "$env:SystemDrive\Recovery\Winre.wim"
-  )
-  foreach ($c in $candidates) {
+  )) {
     if (Test-Path $c -ErrorAction SilentlyContinue) {
-      Write-BuildLog "Found winre.wim (well-known path): $c" -Level Success
+      Write-BuildLog "Found winre.wim (tier 1, known path): $c" -Level Success
       return $c
     }
   }
 
-  # Tier 2: parse ReAgent.xml for the WIM's relative path, then scan all lettered drives.
-  # ReAgent.xml lives at %SystemRoot%\System32\Recovery\ReAgent.xml on all Windows 10/11 installs.
-  $reagentXml = Join-Path $env:SystemRoot "System32\Recovery\ReAgent.xml"
+  # ── Tier 2: ReAgent.xml ───────────────────────────────────────────────────
+  # ReAgent.xml is at %SystemRoot%\System32\Recovery\ReAgent.xml on every Win10/11 install.
+  # WinreLocation.path is a FOLDER path relative to the recovery partition root
+  # e.g. \Recovery\WindowsRE — so we must append \Winre.wim before probing.
+  $reagentXml    = "$env:SystemRoot\System32\Recovery\ReAgent.xml"
+  $xmlFolderPath = $null   # e.g. \Recovery\WindowsRE
+  $xmlPartGuid   = $null   # GPT unique partition GUID from the XML (may differ from Get-Partition .Guid)
+
   if (Test-Path $reagentXml -ErrorAction SilentlyContinue) {
-    Write-BuildLog "Parsing ReAgent.xml for WinRE location..." -Level Info
+    Write-BuildLog "Parsing ReAgent.xml..." -Level Info
     try {
-      [xml]$xml = Get-Content $reagentXml -ErrorAction Stop
-      $relPath = $xml.WindowsRE.WinreLocation.path   # e.g.  \Recovery\WindowsRE\Winre.wim
-      if ($relPath) {
+      [xml]$xDoc     = Get-Content $reagentXml -ErrorAction Stop
+      $loc           = $xDoc.WindowsRE.WinreLocation
+      $xmlFolderPath = $loc.path          # folder, not file — e.g. \Recovery\WindowsRE
+      $xmlPartGuid   = $loc.guid          # e.g. {05c76bc0-fed7-43c0-bf30-6edea8c4a36d}
+
+      if ($xmlFolderPath) {
+        # Build file path: folder + Winre.wim
+        $wimRelPath = $xmlFolderPath.TrimStart('\') + '\Winre.wim'
         foreach ($drv in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Root) {
-          $candidate = "${drv}" + $relPath.TrimStart('\')
-          if (Test-Path $candidate -ErrorAction SilentlyContinue) {
-            Write-BuildLog "Found winre.wim via ReAgent.xml drive scan: $candidate" -Level Success
-            return $candidate
+          $c = Join-Path $drv $wimRelPath
+          if (Test-Path $c -ErrorAction SilentlyContinue) {
+            Write-BuildLog "Found winre.wim (tier 2, ReAgent.xml + drive scan): $c" -Level Success
+            return $c
           }
         }
       }
     } catch {
-      Write-BuildLog "ReAgent.xml parse failed: $_" -Level Warning
+      Write-BuildLog "ReAgent.xml parse error: $_" -Level Warning
     }
   }
 
-  # Tier 3: reagentc /info.
-  # On most Windows 11 installs WinRE lives on a hidden recovery partition with no drive letter.
-  # reagentc reports it as \\?\GLOBALROOT\device\harddiskX\partitionY\path\winre.wim.
-  # DISM Export-Image understands device paths directly — Test-Path will return $false on them
-  # but we pass the path straight to DISM where it works fine.
-  Write-BuildLog "Querying reagentc /info for WinRE path..." -Level Info
+  # ── Tier 3: temporary recovery-partition mount ────────────────────────────
+  # On a standard Windows 10/11 GPT disk the recovery partition has no drive letter.
+  # Strategy: find it via Get-Partition (by GptType or GUID), temporarily assign a
+  # drive letter with Add-PartitionAccessPath, copy Winre.wim to the work folder,
+  # then immediately remove the access path.
+  Write-BuildLog "Searching for recovery partition to mount temporarily..." -Level Info
+  $tempDrive = $null; $tempDiskNum = $null; $tempPartNum = $null
+  try {
+    # Collect candidate partitions. Prefer the exact GUID from ReAgent.xml, then fall
+    # back to the GPT Recovery type GUID (de94bba4-06d1-4d40-a16a-bfd50179d6ac).
+    $allParts = Get-Partition -ErrorAction SilentlyContinue
+    $candidates = @()
+
+    if ($xmlPartGuid -and $xmlPartGuid -notmatch '^[{]?0+[}]?$') {
+      $guidClean = $xmlPartGuid -replace '[{}]',''
+      $byGuid = $allParts | Where-Object { $_.Guid -and ($_.Guid -replace '[{}]','') -eq $guidClean }
+      if ($byGuid) { $candidates += $byGuid }
+    }
+
+    # Always also include GPT Recovery typed partitions as fallback candidates
+    $recoveryType = '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}'
+    $byType = $allParts | Where-Object {
+      ($_.GptType -eq $recoveryType) -or ($_.Type -eq 'Recovery')
+    }
+    foreach ($p in $byType) {
+      if (-not ($candidates | Where-Object { $_.DiskNumber -eq $p.DiskNumber -and $_.PartitionNumber -eq $p.PartitionNumber })) {
+        $candidates += $p
+      }
+    }
+
+    foreach ($part in $candidates) {
+      # Skip partitions that already have a drive letter (would have been found in tier 1/2)
+      if ($part.DriveLetter -and [char]$part.DriveLetter -ne [char]0) { continue }
+
+      # Pick first unused drive letter from Z..H (avoid C:)
+      $freeLetter = [char[]](90..72) |
+        Where-Object { -not (Test-Path "${_}:\") } |
+        Select-Object -First 1
+      if (-not $freeLetter) {
+        Write-BuildLog "No free drive letters available for partition mount" -Level Warning
+        continue
+      }
+
+      $tempDrive    = [string]$freeLetter
+      $tempDiskNum  = $part.DiskNumber
+      $tempPartNum  = $part.PartitionNumber
+      Write-BuildLog "Mounting recovery partition (Disk $tempDiskNum Partition $tempPartNum) as ${tempDrive}:..." -Level Info
+
+      Add-PartitionAccessPath -DiskNumber $tempDiskNum -PartitionNumber $tempPartNum `
+        -AccessPath "${tempDrive}:\" -ErrorAction Stop
+      Start-Sleep -Milliseconds 800   # allow the volume to initialise
+
+      # Build search paths on the mounted partition
+      $searchPaths = @()
+      if ($xmlFolderPath) {
+        $searchPaths += $xmlFolderPath.TrimStart('\') + '\Winre.wim'
+      }
+      $searchPaths += @(
+        'Recovery\WindowsRE\Winre.wim',
+        'Recovery\Winre.wim',
+        'Windows\System32\Recovery\Winre.wim'
+      )
+
+      $found = $null
+      foreach ($sub in $searchPaths) {
+        $probe = "${tempDrive}:\$sub"
+        if (Test-Path $probe -ErrorAction SilentlyContinue) { $found = $probe; break }
+      }
+
+      if ($found) {
+        # Copy the WIM to the work folder so we can unmount immediately
+        $workDir  = $Script:Config.Paths.Work
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        $tempWim  = Join-Path $workDir 'winre_extracted.wim'
+        Write-BuildLog "Copying winre.wim from recovery partition → work folder..." -Level Info
+        Copy-Item -LiteralPath $found -Destination $tempWim -Force -ErrorAction Stop
+        Remove-PartitionAccessPath -DiskNumber $tempDiskNum -PartitionNumber $tempPartNum `
+          -AccessPath "${tempDrive}:\" -ErrorAction SilentlyContinue
+        $tempDrive = $null
+        Write-BuildLog "Found winre.wim (tier 3, recovery partition mount): $tempWim" -Level Success
+        return $tempWim
+      }
+
+      # Nothing on this partition — unmount and try the next candidate
+      Remove-PartitionAccessPath -DiskNumber $tempDiskNum -PartitionNumber $tempPartNum `
+        -AccessPath "${tempDrive}:\" -ErrorAction SilentlyContinue
+      $tempDrive = $null
+    }
+  } catch {
+    Write-BuildLog "Recovery partition mount failed: $_" -Level Warning
+    if ($tempDrive -and ($tempDiskNum -ne $null) -and ($tempPartNum -ne $null)) {
+      Remove-PartitionAccessPath -DiskNumber $tempDiskNum -PartitionNumber $tempPartNum `
+        -AccessPath "${tempDrive}:\" -ErrorAction SilentlyContinue
+    }
+  }
+
+  # ── Tier 4: reagentc /info ────────────────────────────────────────────────
+  # reagentc may output \\?\GLOBALROOT\device\harddiskX\partitionY\...\Winre.wim
+  # DISM Export-Image accepts device paths natively; Test-Path does not.
+  # The literal text in reagentc output uses backslashes: \\?\GLOBALROOT\...
+  Write-BuildLog "Querying reagentc /info..." -Level Info
   try {
     $reagentOut = & "$env:SystemRoot\System32\reagentc.exe" /info 2>&1
-    $wimLine = $reagentOut | Where-Object { $_ -match '\.wim' } | Select-Object -First 1
-    if ($wimLine) {
-      # Device path (recovery partition without a drive letter) — usable directly by DISM
-      if ($wimLine -match '(\\\\[?\\]GLOBALROOT\\[^\s]+\.wim)') {
-        $devicePath = $Matches[1]
-        Write-BuildLog "WinRE on recovery partition (device path, no drive letter): $devicePath" -Level Info
-        Write-BuildLog "DISM will access it via device path — Test-Path returns false but this is expected" -Level Info
-        return $devicePath
-      }
-      # Normal drive-letter path
-      if ($wimLine -match '([A-Za-z]:\\[^\s]+\.wim)') {
-        $drivePath = $Matches[1]
-        if (Test-Path $drivePath -ErrorAction SilentlyContinue) {
-          Write-BuildLog "Found winre.wim via reagentc: $drivePath" -Level Success
-          return $drivePath
-        }
+    $fullOutput = $reagentOut | Out-String
+
+    # Match \\?\GLOBALROOT\... or \??\GLOBALROOT\... (both device path forms appear in the wild)
+    if ($fullOutput -match '(?i)(\\\\[?\\\\]{1,3}GLOBALROOT\\[^\s\r\n]+\.wim)') {
+      $rawPath = $Matches[1].Trim()
+      # Normalise to canonical \\?\GLOBALROOT form
+      $normPath = '\\?\GLOBALROOT\' + ($rawPath -replace '^([\\?]+GLOBALROOT\\)','') 
+      Write-BuildLog "WinRE device path from reagentc: $normPath" -Level Info
+      Write-BuildLog "Note: Test-Path returns false for device paths; DISM handles them directly" -Level Info
+      return $normPath
+    }
+    if ($fullOutput -match '([A-Za-z]:\\[^\s\r\n]+\.wim)') {
+      $dp = $Matches[1].Trim()
+      if (Test-Path $dp -ErrorAction SilentlyContinue) {
+        Write-BuildLog "Found winre.wim (tier 4, reagentc drive path): $dp" -Level Success
+        return $dp
       }
     }
   } catch {
     Write-BuildLog "reagentc query failed: $_" -Level Warning
   }
 
-  # Tier 4: broad scan of all accessible drive roots
+  # ── Tier 5: broad drive scan ──────────────────────────────────────────────
   Write-BuildLog "Scanning all accessible drives for winre.wim..." -Level Info
   foreach ($drv in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Root) {
     foreach ($sub in @('Recovery\WindowsRE\Winre.wim','Recovery\Winre.wim','Windows\System32\Recovery\Winre.wim')) {
       $fp = Join-Path $drv $sub
       if (Test-Path $fp -ErrorAction SilentlyContinue) {
-        Write-BuildLog "Found winre.wim via drive scan: $fp" -Level Success
+        Write-BuildLog "Found winre.wim (tier 5, broad scan): $fp" -Level Success
         return $fp
       }
     }
   }
 
-  throw "Could not locate winre.wim on this machine.`nCommon fixes:`n  1. Run: reagentc /enable  (as Administrator, then reboot)`n  2. Use -SourceISO mode instead of -UseWinRE`n  3. Manually copy winre.wim to C:\Recovery\WindowsRE\Winre.wim and retry"
+  throw (
+    "Could not locate winre.wim on this machine.`n" +
+    "Common fixes:`n" +
+    "  1. Run (as Administrator): reagentc /enable   then reboot and retry`n" +
+    "  2. Pass -SourceISO <path-to-windows.iso> instead of -UseWinRE`n" +
+    "  3. Manually place winre.wim at: $env:SystemDrive\Recovery\WindowsRE\Winre.wim"
+  )
 }
 
 # Prepare the WIM source and ISO media structure.
