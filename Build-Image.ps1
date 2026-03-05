@@ -1269,6 +1269,26 @@ function Inject-AllApps {
 # ============================================
 # REGISTRY (minimal; no FBWF on by default)
 # ============================================
+function Invoke-RegLoad {
+  param([string]$Key, [string]$HivePath)
+  # Force-unload any stale handle from a prior crashed build, then load fresh.
+  reg unload $Key 2>$null | Out-Null
+  $out = reg load $Key $HivePath 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "reg load $Key failed (exit $LASTEXITCODE): $out`nHive: $HivePath"
+  }
+}
+
+function Invoke-RegAdd {
+  param([string[]]$Args)
+  $out = & reg add @Args 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Write-BuildLog "  reg add failed (exit $LASTEXITCODE): $out" -Level Warning
+    return $false
+  }
+  return $true
+}
+
 function Configure-SystemRegistry {
   Write-BuildLog "Configuring Registry (minimal)…"
   $mount = $Script:Config.Paths.Mount
@@ -1276,26 +1296,26 @@ function Configure-SystemRegistry {
   $sysPath = Join-Path "$mount" "Windows\System32\config\SYSTEM"
   $softPath = Join-Path "$mount" "Windows\System32\config\SOFTWARE"
 
-  reg load "HKLM\RAM_SYS" "$sysPath" | Out-Null
-  reg load "HKLM\RAM_SW" "$softPath" | Out-Null
+  Invoke-RegLoad "HKLM\RAM_SYS" $sysPath
+  Invoke-RegLoad "HKLM\RAM_SW"  $softPath
 
   try {
-    # Shell is driven entirely by winpeshl.ini (WinXShell + Explorer++); clear the registry value
-    reg add "HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d "" /f | Out-Null
+    # WinPE does not use Winlogon\Shell — clear it so nothing overrides startnet.cmd
+    Invoke-RegAdd @("HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon", "/v", "Shell", "/t", "REG_SZ", "/d", "", "/f") | Out-Null
 
     if ($Script:Config.Apps.ContainsKey("Java")) {
       $javaInstall = "X:\Program Files\PortableApps\Java"
-      reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "$javaInstall" /f | Out-Null
+      $ok = Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "JAVA_HOME", "/t", "REG_SZ", "/d", $javaInstall, "/f")
       # Append Java\bin to PATH so java.exe is callable without full path
       $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
         Select-String 'REG_EXPAND_SZ|REG_SZ' |
         ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
       if ($existingPath) {
-        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$javaInstall\bin" /f | Out-Null
+        $ok = $ok -and (Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "$existingPath;$javaInstall\bin", "/f"))
       } else {
-        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "%SystemRoot%\System32;%SystemRoot%;$javaInstall\bin" /f | Out-Null
+        $ok = $ok -and (Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "%SystemRoot%\System32;%SystemRoot%;$javaInstall\bin", "/f"))
       }
-      Write-BuildLog "JAVA_HOME and PATH configured for Java" -Level "Success"
+      Write-BuildLog "JAVA_HOME and PATH configured for Java" -Level $(if ($ok) { 'Success' } else { 'Warning' })
     }
 
     # Add 7-Zip to PATH
@@ -1305,26 +1325,26 @@ function Configure-SystemRegistry {
         Select-String 'REG_EXPAND_SZ|REG_SZ' |
         ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
       if ($existingPath) {
-        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$szInstall" /f | Out-Null
+        $ok = Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "$existingPath;$szInstall", "/f")
       } else {
-        reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "%SystemRoot%\System32;%SystemRoot%;$szInstall" /f | Out-Null
+        $ok = Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "%SystemRoot%\System32;%SystemRoot%;$szInstall", "/f")
       }
-      Write-BuildLog "7-Zip added to PATH" -Level "Success"
+      Write-BuildLog "7-Zip added to PATH" -Level $(if ($ok) { 'Success' } else { 'Warning' })
     }
 
     if ($IncludeExplorerPlus) {
-      reg add "HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP" /ve /d "Open with Explorer++" /f | Out-Null
-      reg add "HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP\command" /ve /d "X:\Program Files\PortableApps\ExplorerPP\Explorer++.exe \"%1\"" /f | Out-Null
+      Invoke-RegAdd @("HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP", "/ve", "/d", "Open with Explorer++", "/f") | Out-Null
+      Invoke-RegAdd @("HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP\command", "/ve", "/d", "X:\Program Files\PortableApps\ExplorerPP\Explorer++.exe `"%1`"", "/f") | Out-Null
     }
 
     if ($EnableFBWF) {
       # Set desired overlay size (enablement typically requires reboot; we don't force it here)
-      reg add "HKLM\RAM_SYS\ControlSet001\Control\FBWF" /v OverlaySize /t REG_DWORD /d $RamdiskSizeMB /f | Out-Null
+      Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\FBWF", "/v", "OverlaySize", "/t", "REG_DWORD", "/d", "$RamdiskSizeMB", "/f") | Out-Null
     }
   }
   finally {
-    reg unload "HKLM\RAM_SYS" | Out-Null
-    reg unload "HKLM\RAM_SW" | Out-Null
+    reg unload "HKLM\RAM_SYS" 2>&1 | Out-Null
+    reg unload "HKLM\RAM_SW"  2>&1 | Out-Null
   }
 
   Write-BuildLog "Registry configured" -Level "Success"
