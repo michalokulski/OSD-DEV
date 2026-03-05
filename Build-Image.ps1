@@ -1437,7 +1437,7 @@ wpeutil DisableFirewall
     $content += @'
 
 REM === WiFi Initialization (OSD) ===
-PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
+PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnetUpdate } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
 '@
   }
 
