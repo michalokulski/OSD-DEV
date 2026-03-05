@@ -1262,7 +1262,7 @@ function Inject-AllApps {
     $wallDir = Join-Path $Script:Config.Paths.Mount "Windows\Web\Wallpaper\RAMOS"
     New-Item -Path $wallDir -ItemType Directory -Force | Out-Null
     Copy-Item "$WallpaperPath" (Join-Path $wallDir "custom.jpg") -Force
-    $Script:Config.WallpaperDest = "C:\Windows\Web\Wallpaper\RAMOS\custom.jpg"
+    $Script:Config.WallpaperDest = "X:\Windows\Web\Wallpaper\RAMOS\custom.jpg"
   }
 }
 
@@ -1284,7 +1284,7 @@ function Configure-SystemRegistry {
     reg add "HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d "" /f | Out-Null
 
     if ($Script:Config.Apps.ContainsKey("Java")) {
-      $javaInstall = "C:\Program Files\PortableApps\Java"
+      $javaInstall = "X:\Program Files\PortableApps\Java"
       reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "$javaInstall" /f | Out-Null
       # Append Java\bin to PATH so java.exe is callable without full path
       $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
@@ -1300,7 +1300,7 @@ function Configure-SystemRegistry {
 
     # Add 7-Zip to PATH
     if ($Script:Config.Apps.ContainsKey("7-Zip")) {
-      $szInstall = "C:\Program Files\PortableApps\7-Zip"
+      $szInstall = "X:\Program Files\PortableApps\7-Zip"
       $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
         Select-String 'REG_EXPAND_SZ|REG_SZ' |
         ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
@@ -1314,7 +1314,7 @@ function Configure-SystemRegistry {
 
     if ($IncludeExplorerPlus) {
       reg add "HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP" /ve /d "Open with Explorer++" /f | Out-Null
-      reg add "HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP\command" /ve /d "C:\Program Files\PortableApps\ExplorerPP\Explorer++.exe `"%1`"" /f | Out-Null
+      reg add "HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP\command" /ve /d "X:\Program Files\PortableApps\ExplorerPP\Explorer++.exe \"%1\"" /f | Out-Null
     }
 
     if ($EnableFBWF) {
@@ -1343,7 +1343,7 @@ function Create-StartupScript {
   $mountedBase  = Join-Path $mount 'Program Files\PortableApps'
   $wxItem       = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell_x64.exe'
   if (-not $wxItem) { $wxItem = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell.exe' }
-  $wxRuntime    = if ($wxItem) { $wxItem.FullName -replace [regex]::Escape($mount), 'C:' } else { $null }
+  $wxRuntime    = if ($wxItem) { $wxItem.FullName -replace [regex]::Escape($mount), 'X:' } else { $null }
 
   # ── OSD-inspired pattern ─────────────────────────────────────────────
   # startnet.cmd IS the entry point: wpeinit → network → WiFi → shell
@@ -1424,7 +1424,7 @@ function Create-ChromeLauncher {
   # Build path:   D:\Build\Apps\Chrome\Application\chrome.exe
   # Runtime path: C:\Program Files\PortableApps\Chrome\Application\chrome.exe
   $buildAppsRoot = $Script:Config.Paths.Apps
-  $runtimeAppsRoot = "C:\Program Files\PortableApps"
+  $runtimeAppsRoot = "X:\Program Files\PortableApps"
   $chromeExeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot),$runtimeAppsRoot
 
   $launcher = @'
