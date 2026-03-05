@@ -1051,7 +1051,29 @@ function Get-Applications {
   # Flatten to: Apps\WinXShell\WinXShell_x64.exe (find the dir containing the exe)
   $wxZip = Join-Path $cache "WinXShell.7z"
   if (-not (Test-Path $wxZip)) {
-    Invoke-WebRequest -Uri $Script:AppSources.WinXShell -OutFile $wxZip -UseBasicParsing
+    # The official URL embeds a forum session token that expires. Check for a manually-placed
+    # archive first (any WinXShell*.7z or *.zip already in the cache dir takes priority).
+    $manualWx = Get-ChildItem -Path $cache -Filter 'WinXShell*.7z' -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $manualWx) {
+      $manualWx = Get-ChildItem -Path $cache -Filter 'WinXShell*.zip' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    }
+    if ($manualWx) {
+      Write-BuildLog "  Using manually-placed WinXShell archive: $($manualWx.Name)" -Level Info
+      Copy-Item $manualWx.FullName $wxZip -Force
+    } else {
+      Write-BuildLog "  Downloading WinXShell (URL contains session token — may be expired)..." -Level Warning
+      try {
+        Invoke-WebRequest -Uri $Script:AppSources.WinXShell -OutFile $wxZip -UseBasicParsing -ErrorAction Stop
+      } catch {
+        Remove-Item $wxZip -Force -ErrorAction SilentlyContinue
+        throw ("WinXShell download failed: $_`n`n" +
+          "The download URL requires an active forum session token and may have expired.`n" +
+          "Manual fix: download WinXShell RC4 from https://www.theoven.org`n" +
+          "  then place the archive at: $wxZip")
+      }
+    }
   }
   $wxDest = Join-Path $apps "WinXShell"
   New-Item -ItemType Directory -Force -Path $wxDest | Out-Null
@@ -1068,32 +1090,63 @@ function Get-Applications {
       $parent = $parent.Parent
     }
   }
+  
+  # VERIFICATION: Ensure WinXShell executable exists after extraction (Fix #2)
+  $wxExe = Get-ChildItem -Path $wxDest -Recurse -Filter 'WinXShell_x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $wxExe) {
+    Write-BuildLog "ERROR: WinXShell executable not found after extraction" -Level Error
+    throw "WinXShell extraction failed or archive was corrupted. Build cannot continue."
+  }
+  Write-BuildLog "WinXShell verified and ready for injection" -Level Success
+  
   $Script:Config.Apps.WinXShell = $wxDest
 
-  # --- 7-Zip (full portable for the image) ---
+  # --- 7-Zip (full portable for the image) ===
+  # Extraction-only approach (no installer execution): more reliable and consistent
   Write-BuildLog "Downloading 7-Zip portable..."
   $szDest = Join-Path $apps "7-Zip"
   New-Item -ItemType Directory -Force -Path $szDest | Out-Null
-  $szExe = Join-Path $cache "7z-full.exe"
-  if (-not (Test-Path $szExe)) {
+  
+  # Try to download and extract the 7z-extra.7z archive (contains portable binaries)
+  $szExtra = Join-Path $cache "7z-extra.7z"
+  if (-not (Test-Path $szExtra)) {
     try {
-      Invoke-WebRequest -Uri $Script:AppSources.SevenZipFull -OutFile $szExe -UseBasicParsing
+      Write-BuildLog "  Downloading 7z-extra.7z from 7-zip.org..." -Level Info
+      Invoke-WebRequest -Uri $Script:AppSources.SevenZipExtra -OutFile $szExtra -UseBasicParsing -ErrorAction Stop
     } catch {
-      Write-BuildLog "Failed to download 7-Zip full installer, trying extra archive..." -Level Warning
-      $szExtra = Join-Path $cache "7z-extra.7z"
-      Invoke-WebRequest -Uri $Script:AppSources.SevenZipExtra -OutFile $szExtra -UseBasicParsing
-      Expand-7z -ArchivePath $szExtra -Destination $szDest
-      $szExe = $null
+      Write-BuildLog "  Failed to download from SevenZipExtra source: $_" -Level Warning
+      # Fallback: try alternative mirror or older version
+      try {
+        Write-BuildLog "  Retrying with SevenZipFull (SFX archive)..." -Level Info
+        $szExe = Join-Path $cache "7z-full.exe"
+        Invoke-WebRequest -Uri $Script:AppSources.SevenZipFull -OutFile $szExe -UseBasicParsing -ErrorAction Stop
+        $szExtra = $szExe  # Treat SFX executable as extractable archive
+      } catch {
+        Write-BuildLog "  Failed to download 7-Zip from any source: $_" -Level Error
+        throw "Could not download 7-Zip. Check internet connection and sources."
+      }
     }
   }
-  if ($szExe -and (Test-Path $szExe)) {
-    # 7-Zip installer supports /D= for target directory and /S for silent
-    try {
-      Start-Process -FilePath $szExe -ArgumentList "/S /D=$szDest" -Wait -WindowStyle Hidden -ErrorAction Stop
-    } catch {
-      Expand-7z -ArchivePath $szExe -Destination $szDest
-    }
+  
+  # Extract using 7zr.exe (ensured by Ensure-7z function)
+  try {
+    Write-BuildLog "  Extracting 7-Zip archive..." -Level Info
+    Expand-7z -ArchivePath $szExtra -Destination $szDest
+    Write-BuildLog "  7-Zip extracted successfully" -Level Info
+  } catch {
+    Write-BuildLog "  Failed to extract 7-Zip: $_" -Level Error
+    throw "7-Zip extraction failed. Archive may be corrupted."
   }
+  
+  # Verify 7-Zip binaries are present.
+  # 7z-extra.7z contains 7za.exe (standalone console); 7z-full.exe SFX contains 7z.exe.
+  $sz7zExe  = Join-Path $szDest "7z.exe"
+  $sz7zaExe = Join-Path $szDest "7za.exe"
+  $sz7zX64  = Join-Path $szDest "x64\7z.exe"
+  if (-not (Test-Path $sz7zExe) -and -not (Test-Path $sz7zaExe) -and -not (Test-Path $sz7zX64)) {
+    Write-BuildLog "  Warning: neither 7z.exe nor 7za.exe found after extraction — PATH entry may not resolve correctly" -Level Warning
+  }
+  
   $Script:Config.Apps.'7-Zip' = $szDest
   Write-BuildLog "7-Zip prepared for injection" -Level "Success"
 
@@ -1114,6 +1167,7 @@ function Get-Applications {
     Remove-Item $nestedPath -Force -ErrorAction SilentlyContinue
   }
   $Script:Config.Apps.Java = $javaRoot
+  Write-BuildLog "Note: IBM Semeru JDK adds ~175 MB to the WIM ramdisk. Ensure the boot target has at least 2 GB RAM." -Level Warning
 
   # --- Explorer++ portable ---
   if ($IncludeExplorerPlus) {
@@ -1242,6 +1296,50 @@ function Get-Applications {
   }
 }
 
+function Create-WinXShellConfig {
+  # Writes a winxshell.jcfg into the WinXShell app staging directory so that
+  # WinXShell_x64.exe picks it up at boot.
+  # - desktop.path  → the folder whose .lnk files become desktop icons
+  # - wallpaper.path → background image (X:\ path after boot)
+  # Without this config WinXShell may default to a blank/unconfigured desktop.
+  Write-BuildLog "Creating WinXShell desktop configuration..."
+
+  $wxDest = $Script:Config.Apps.WinXShell
+  if (-not $wxDest -or -not (Test-Path $wxDest)) {
+    Write-BuildLog "WinXShell directory not found — skipping config" -Level Warning
+    return
+  }
+
+  # In WinPE, X:\Users\Public\Desktop is the reliable desktop folder regardless
+  # of which user profile WinPE creates at runtime.
+  $wallpaperRuntime = if ($WallpaperPath) { "X:\\Windows\\Web\\Wallpaper\\RAMOS\\custom.jpg" } else { "" }
+
+  # WinXShell RC4 reads winxshell.jcfg from the same directory as the .exe.
+  $jcfg = @"
+{
+  "taskbar": {
+    "position": "bottom",
+    "autohide": false,
+    "always_on_top": true,
+    "show_clock": true,
+    "show_tray": true
+  },
+  "desktop": {
+    "path": "X:\\\\Users\\\\Public\\\\Desktop",
+    "show_icons": true
+  },
+  "wallpaper": {
+    "path": "$wallpaperRuntime",
+    "style": "fill"
+  }
+}
+"@
+
+  $configPath = Join-Path $wxDest "winxshell.jcfg"
+  Set-Content -Path $configPath -Value $jcfg -Encoding UTF8 -Force
+  Write-BuildLog "WinXShell config → winxshell.jcfg (desktop: X:\Users\Public\Desktop; wallpaper: $(if ($wallpaperRuntime) { $wallpaperRuntime } else { 'none' }))" -Level Success
+}
+
 function Inject-AllApps {
   Write-BuildLog "Injecting applications into WIM image..."
 
@@ -1289,9 +1387,9 @@ function Configure-SystemRegistry {
   if ($LASTEXITCODE -ne 0) { throw "reg load HKLM\RAM_SYS failed (exit $LASTEXITCODE): $out" }
 
   try {
-    $out = reg add "HKLM\RAM_SYS\ControlSet001\Control\FBWF" /v OverlaySize /t REG_DWORD /d $RamdiskSizeMB /f 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-BuildLog "  FBWF OverlaySize reg add failed: $out" -Level Warning }
-    else { Write-BuildLog "FBWF OverlaySize set to $RamdiskSizeMB MB" -Level Success }
+    $out = reg add "HKLM\RAM_SYS\ControlSet001\Services\FBWF\Parameters" /v WinPECacheThreshold /t REG_DWORD /d $RamdiskSizeMB /f 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-BuildLog "  FBWF Cache Threshold reg add failed: $out" -Level Warning }
+    else { Write-BuildLog "FBWF WinPECacheThreshold set to $RamdiskSizeMB MB" -Level Success }
   } finally {
     reg unload "HKLM\RAM_SYS" 2>&1 | Out-Null
   }
@@ -1311,17 +1409,27 @@ function Create-StartupScript {
   $wxItem       = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell_x64.exe'
   if (-not $wxItem) { $wxItem = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell.exe' }
   $wxRuntime    = if ($wxItem) { $wxItem.FullName -replace [regex]::Escape($mount), 'X:' } else { $null }
+  
+  # VALIDATION: Ensure path conversion from mount to X: drive succeeded (Fix #3)
+  if ($wxRuntime -and -not $wxRuntime.StartsWith('X:\')) {
+    Write-BuildLog "ERROR: WinXShell path conversion failed. Expected X:\ prefix, got: $wxRuntime" -Level Error
+    throw "Critical path conversion error. Build cannot continue."
+  }
 
-  # ── OSD-inspired pattern ─────────────────────────────────────────────
-  # startnet.cmd IS the entry point: wpeinit → network → WiFi → shell
-  # WinXShell is launched at the END (start /wait) so all init is done first.
-  # No winpeshl.ini needed — WinPE defaults to cmd.exe → startnet.cmd.
+  # ── Startup sequence (optimized) ───────────────────────────────────────────
+  # 1. wpeinit: initializes all devices, network adapters, and storage
+  #    (no need for separate wpeutil InitializeNetwork — wpeinit already does this)
+  # 2. Disable firewall for easier network access
+  # 3. WiFi setup (if enabled)
+  # 4. Environment variables for Java, 7-Zip, etc.
+  # 5. Launch WinXShell (last step, blocking)
+  #
+  # Reference: Build-Image-OldWay-Rework.ps1
   $content = @'
 @ECHO OFF
 wpeinit
 
-REM Initialize wired network
-wpeutil InitializeNetwork
+REM Disable firewall for easier network access
 wpeutil DisableFirewall
 '@
 
@@ -1345,12 +1453,27 @@ PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDC
 
   # Launch WinXShell (blocking — when WinXShell exits, WinPE shuts down)
   if ($wxRuntime) {
-    $content += "`r`n`r`nREM === Start Shell ===`r`nstart /wait `"WinXShell`" `"$wxRuntime`"`r`n"
+    # FIX #1: Use empty title with variable to avoid START command ambiguity with quoted paths
+    # Pattern: set VAR=path && start /wait "" "%VAR%"
+    $content += @"
+
+REM === Apply Post-Shell Tweaks ===
+if exist "X:\Windows\System32\RAMOS\PostShell.cmd" (
+  start "" "X:\Windows\System32\RAMOS\PostShell.cmd"
+)
+
+REM === Start Shell ===
+set WXSHELL=$wxRuntime
+start /wait "" "%WXSHELL%"
+"@
     Write-BuildLog "  StartNet.cmd will launch: $wxRuntime" -Level Info
   } else {
-    # WinXShell not found — fall back to cmd so the image still boots
-    $content += "`r`n`r`nREM === Shell (WinXShell not found, falling back to cmd) ===`r`ncmd.exe /k`r`n"
-    Write-BuildLog "  WinXShell not found in WIM — StartNet.cmd falls back to cmd.exe" -Level Warning
+    # FIX #4: Make shell fallback a hard error (cannot boot without shell)
+    $msg = "CRITICAL: WinXShell was not found in the mounted WIM.`n"
+    $msg += "The bootable image cannot function without a shell.`n"
+    $msg += "Verify WinXShell download/extraction succeeded and try again."
+    Write-BuildLog $msg -Level Error
+    throw "WinXShell not available - build cannot complete."
   }
 
   $content += @'
@@ -1372,19 +1495,24 @@ function Create-PostShellScript {
 
   $post = @'
 @echo off
-REM Apply visual tweaks for current user after Explorer has started
+REM Post-startup tweaks.
+REM NOTE: DWM does not run in WinPE — accent-color and colorization writes are
+REM       stored in-registry and will take effect if the image is ever booted into
+REM       a full Windows session; they are harmless no-ops in WinPE.
+REM       Wallpaper is set via WinXShell config (winxshell.jcfg) — the HKCU key
+REM       below is a secondary hint in case the shell reads the registry as well.
 if exist "%SystemRoot%\System32\reg.exe" (
   if not "{WALL}"=="" if exist "{WALL}" (
-    reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "{WALL}" /f
-    rundll32.exe user32.dll,UpdatePerUserSystemParameters
+    reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "{WALL}" /f >nul 2>&1
+    reg add "HKCU\Control Panel\Desktop" /v WallpaperStyle /t REG_SZ /d 10 /f >nul 2>&1
   )
-  REM Accent color (DWM colorization)
+  REM Accent color — ARGB DWORD (0xFF + 6-digit hex)
   reg add "HKCU\Software\Microsoft\Windows\DWM" /v ColorPrevalence /t REG_DWORD /d 1 /f >nul 2>&1
   reg add "HKCU\Software\Microsoft\Windows\DWM" /v AccentColor /t REG_DWORD /d 0x{ACCENT} /f >nul 2>&1
   reg add "HKCU\Software\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0x{ACCENT} /f >nul 2>&1
 )
 exit /b 0
-'@.Replace("{WALL}",$(if ($wall) { $wall } else { "" })).Replace("{ACCENT}",$AccentColor)
+'@.Replace("{WALL}",$(if ($wall) { $wall } else { "" })).Replace("{ACCENT}","FF$AccentColor")
 
   Set-Content -Path (Join-Path $postDir "PostShell.cmd") -Value $post -Encoding ASCII -Force
   Write-BuildLog "PostShell.cmd created" -Level "Success"
@@ -1415,6 +1543,65 @@ exit /b 0
 '@.Replace('{CHROME}',$chromeExeRuntime)
 
   Set-Content -Path (Join-Path $tools "StartChrome.cmd") -Value $launcher -Encoding ASCII -Force
+}
+
+function Create-DesktopShortcuts {
+  Write-BuildLog "Creating Desktop Custom Shortcuts..."
+  $mount = $Script:Config.Paths.Mount
+  
+  # Standard WinPE Desktop folders
+  $desktopDirs = @(
+    (Join-Path $mount "Users\Public\Desktop"),
+    (Join-Path $mount "Users\Default\Desktop"),
+    (Join-Path $mount "Windows\System32\config\systemprofile\Desktop")
+  )
+
+  foreach ($d in $desktopDirs) {
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+  }
+
+  $WshShell = New-Object -ComObject WScript.Shell
+
+  # Helper inner block to create lnk across all profiles.
+  # $Arguments is optional; when supplied, TargetPath is the launcher (e.g. cmd.exe)
+  # and Arguments contains the real command — necessary for .cmd/.bat targets because
+  # non-Explorer shells (WinXShell) may not invoke .cmd files directly from .lnk.
+  $createMultiLnk = {
+    param($Name, $Target, $Icon, $Arguments = "")
+    foreach ($d in $desktopDirs) {
+      $lnkPath = Join-Path $d "$Name.lnk"
+      $Shortcut = $WshShell.CreateShortcut($lnkPath)
+      $Shortcut.TargetPath = $Target
+      if ($Arguments) { $Shortcut.Arguments = $Arguments }
+      $Shortcut.IconLocation = "$Icon,0"
+      $workDir = Split-Path -Parent $Target
+      if ($workDir) { $Shortcut.WorkingDirectory = $workDir }
+      $Shortcut.Save()
+    }
+  }
+
+  # Chrome Shortcut — target cmd.exe so WinXShell can reliably launch the .cmd launcher
+  if ($Script:Config.Apps.ChromeExe) {
+    $buildAppsRoot = $Script:Config.Paths.Apps
+    $runtimeAppsRoot = "X:\Program Files\PortableApps"
+    $chromeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
+    # Use cmd.exe as the shortcut target; WinXShell (and all PE shells) can always launch cmd.exe.
+    &$createMultiLnk "Google Chrome" "cmd.exe" $chromeRuntime "/c `"X:\Windows\System32\RAMOS\StartChrome.cmd`""
+  }
+
+  # Explorer++ Shortcut
+  if ($Script:Config.Apps.ExplorerPP) {
+    $epExe = Find-ExeUnder -Root $Script:Config.Apps.ExplorerPP -ExeName "Explorer++.exe"
+    if (-not $epExe) { $epExe = Find-ExeUnder -Root $Script:Config.Apps.ExplorerPP -ExeName "Explorer++_x64.exe" }
+    
+    if ($epExe) {
+      $buildAppsRoot = $Script:Config.Paths.Apps
+      $runtimeAppsRoot = "X:\Program Files\PortableApps"
+      $epRuntime = $epExe.FullName -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
+      
+      &$createMultiLnk "Explorer++" $epRuntime $epRuntime
+    }
+  }
 }
 
 function Write-Winpeshl {
@@ -1534,7 +1721,7 @@ function Build-FinalISO {
   # Use Start-Process (matches OSD's New-WindowsAdkISO) — preserves embedded quotes
   # in -bootdata: argument that & operator would otherwise strip.
   $process = Start-Process $oscdimgexe `
-    -ArgumentList @('-m', '-o', '-u2', "-bootdata:$bootDataString", '-u2', '-udfver102', $isoLabelString, "`"$isoSource`"", "`"$isoFullName`"") `
+    -ArgumentList @('-m', '-o', '-u2', "-bootdata:$bootDataString", '-udfver102', $isoLabelString, "`"$isoSource`"", "`"$isoFullName`"") `
     -PassThru -Wait -WindowStyle Hidden
 
   if ($process.ExitCode -ne 0) {
@@ -1577,11 +1764,13 @@ try {
   }
 
   Get-Applications
+  Create-WinXShellConfig
   Inject-AllApps
 
   Configure-SystemRegistry
   Create-PostShellScript
   Create-ChromeLauncher
+  Create-DesktopShortcuts
   Write-Winpeshl
   Create-StartupScript
 
