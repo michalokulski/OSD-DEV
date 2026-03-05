@@ -255,23 +255,32 @@ $Script:AppSources = @{
 }
 
 # Valid WinPE OCs per MS docs; language packs added when present
+# Packages match OSD's WindowsAdk.ps1 New-WinPE function (Add-WindowsPackage -Path order matters — dependencies first)
+# WiFi/SRT packages appended after the OSD base set
 $Script:WinPEPackages = @(
+  # ── OSD base set (same order as OSD's WindowsAdk.ps1) ──
   "WinPE-WMI",
-  "WinPE-Scripting",
-  "WinPE-PowerShell",
   "WinPE-HTA",
   "WinPE-NetFx",
-  # TODO: WinPE-WOW64 - 32-bit subsystem support for 64-bit WinPE
-  # Currently commented out as it may not be available in all ADK versions
-  # See: https://github.com/slorelee/wimbuilder2/tree/master/Projects/WIN10XPE/01-Components/SysWOW64_Basic
-  # Uncomment if you need 32-bit application support in 64-bit WinPE
-  # "WinPE-WOW64",
-  "WinPE-Fonts-Legacy",
-  "WinPE-StorageWMI",
+  "WinPE-Scripting",
+  "WinPE-PowerShell",
+  "WinPE-SecureStartup",
   "WinPE-DismCmdlets",
+  "WinPE-Dot3Svc",
+  "WinPE-EnhancedStorage",
   "WinPE-FMAPI",
-  "WinPE-WiFi-Package",  # ADK for Windows 10 package name
-  "WinPE-WiFi",           # ADK for Windows 11 alternate name; loop skips whichever .cab is absent
+  "WinPE-GamingPeripherals",
+  "WinPE-PPPoE",
+  "WinPE-PlatformId",
+  "WinPE-PmemCmdlets",
+  "WinPE-RNDIS",
+  "WinPE-SecureBootCmdlets",
+  "WinPE-StorageWMI",
+  "WinPE-WDS-Tools",
+  # ── Extra packages not in OSD base but useful for this build ──
+  "WinPE-Fonts-Legacy",
+  "WinPE-WiFi-Package",  # ADK for Windows 10 name
+  "WinPE-WiFi",           # ADK for Windows 11 alternate name; skipped if .cab absent
   "WinPE-SRT"
 )
 
@@ -887,31 +896,45 @@ function Mount-TargetWIM {
 
 function Add-WinPE-Packages {
   Write-BuildLog "Installing WinPE optional components..."
-  $mount = $Script:Config.Paths.Mount
-  $count = 0
+  $mount  = $Script:Config.Paths.Mount
   $ocRoot = $Script:Config.Tools.WinPEOCs
-  $lang = $Script:Config.Locale
-  if (-not (Test-Path ([System.IO.Path]::Combine($ocRoot,$lang)))) { $lang = "en-us" }
+  $lang   = $Script:Config.Locale
+  if (-not (Test-Path ([System.IO.Path]::Combine($ocRoot,$lang)))) { $lang = 'en-us' }
+  $count  = 0
+  $skipped = 0
 
   $packages = $Script:WinPEPackages.Clone()
-  if ($EnableFBWF) { $packages += "WinPE-FBWF" }
+  if ($EnableFBWF) { $packages += 'WinPE-FBWF' }
 
+  # Match OSD's WindowsAdk.ps1 pattern:
+  #   Add-WindowsPackage -Path (offline, NOT -Online) with $ErrorActionPreference = 'Ignore'
+  #   No /IgnoreCheck — let DISM report real failures; missing .cab is silently skipped
   foreach ($pkg in $packages) {
-    $cab = [System.IO.Path]::Combine($ocRoot,"$pkg.cab")
-    if (Test-Path $cab) {
-      & $Script:Config.Tools.DISM /Add-Package /Image:"$mount" /PackagePath:"$cab" /IgnoreCheck | Out-Null
-      if ($LASTEXITCODE -eq 0) { $count++ } else { Write-BuildLog "Failed adding package: $pkg" -Level Warning }
-      $langCab = [System.IO.Path]::Combine($ocRoot,$lang,"${pkg}_${lang}.cab")
-      if (Test-Path $langCab) {
-        & $Script:Config.Tools.DISM /Add-Package /Image:"$mount" /PackagePath:"$langCab" /IgnoreCheck | Out-Null
+    $cab = [System.IO.Path]::Combine($ocRoot, "$pkg.cab")
+    if (-not (Test-Path $cab)) {
+      Write-BuildLog "  Package not found, skipping: $pkg" -Level Warning
+      $skipped++
+      continue
+    }
+    try {
+      Add-WindowsPackage -Path $mount -PackagePath $cab -ErrorAction Stop | Out-Null
+      $count++
+    } catch {
+      Write-BuildLog "  Failed adding $pkg`: $_" -Level Warning
+    }
+    # Lang pack — silently skip if absent (OSD pattern)
+    $langCab = [System.IO.Path]::Combine($ocRoot, $lang, "${pkg}_${lang}.cab")
+    if (Test-Path $langCab) {
+      try {
+        Add-WindowsPackage -Path $mount -PackagePath $langCab -ErrorAction Stop | Out-Null
+      } catch {
+        Write-BuildLog "  Failed adding lang pack ${pkg}_${lang}: $_" -Level Warning
       }
-    } else {
-      Write-BuildLog "Package not found in OCs: $pkg (skipped)" -Level Warning
     }
   }
 
   $Script:Config.Stats.Packages = $count
-  Write-BuildLog "Added $count WinPE packages" -Level "Success"
+  Write-BuildLog "Added $count WinPE packages ($skipped skipped — .cab not present)" -Level 'Success'
 }
 
 function Add-DellDrivers {
@@ -1024,12 +1047,27 @@ function Get-Applications {
   $apps = $Script:Config.Paths.Apps
 
   # --- WinXShell (portable shell for WinPE) ---
+  # Archive structure: WinXShell_RC4.x.x\WinXShell\WinXShell_x64.exe
+  # Flatten to: Apps\WinXShell\WinXShell_x64.exe (find the dir containing the exe)
   $wxZip = Join-Path $cache "WinXShell.7z"
   if (-not (Test-Path $wxZip)) {
     Invoke-WebRequest -Uri $Script:AppSources.WinXShell -OutFile $wxZip -UseBasicParsing
   }
   $wxDest = Join-Path $apps "WinXShell"
+  New-Item -ItemType Directory -Force -Path $wxDest | Out-Null
   Expand-7z -ArchivePath $wxZip -Destination $wxDest
+  # Flatten: find the actual directory containing WinXShell_x64.exe and move contents up
+  $wxExeItem = Get-ChildItem -Path $wxDest -Recurse -Filter 'WinXShell_x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($wxExeItem -and $wxExeItem.Directory.FullName -ne $wxDest) {
+    Write-BuildLog "  Flattening WinXShell directory: $($wxExeItem.Directory.Name)" -Level Info
+    Get-ChildItem -Path $wxExeItem.Directory.FullName -Force | Move-Item -Destination $wxDest -Force
+    # Remove now-empty parent chain
+    $parent = $wxExeItem.Directory
+    while ($parent.FullName -ne $wxDest) {
+      Remove-Item $parent.FullName -Recurse -Force -ErrorAction SilentlyContinue
+      $parent = $parent.Parent
+    }
+  }
   $Script:Config.Apps.WinXShell = $wxDest
 
   # --- 7-Zip (full portable for the image) ---
@@ -1408,7 +1446,9 @@ function Write-Winpeshl {
 
   # Shell: WinXShell (primary) + Explorer++ (optional file manager); no Microsoft explorer.exe
   $mountedBase = Join-Path $mount "Program Files\PortableApps"
-  $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell.exe"
+  # WinXShell ships as WinXShell_x64.exe (not WinXShell.exe)
+  $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell_x64.exe"
+  if (-not $foundWX) { $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell.exe" }  # fallback for alternate builds
   $winxShellPath = if ($foundWX) { $foundWX.FullName } else { $null }
   $foundEP = Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe"
   $explorerPPPath = if ($foundEP) { $foundEP.FullName } else { $null }
