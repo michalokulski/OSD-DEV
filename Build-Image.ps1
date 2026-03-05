@@ -1448,63 +1448,111 @@ function Write-Winpeshl {
 function Build-FinalISO {
   Write-BuildLog "Building final ISO image..."
 
-  $mount = $Script:Config.Paths.Mount
-  $isoSource = $Script:Config.Paths.ISO
+  $mount       = $Script:Config.Paths.Mount
+  $isoSource   = $Script:Config.Paths.ISO
+  $outputDir   = $Script:Config.Paths.Output
+  $isoLabel    = [System.IO.Path]::GetFileNameWithoutExtension($OutputISOName)
+  $isoFullName = Join-Path $outputDir $OutputISOName
 
+  # ── 1. Commit the WIM ─────────────────────────────────────────────────
+  Write-BuildLog "  Committing WIM..." -Level Info
   & $Script:Config.Tools.DISM /Unmount-Image /MountDir:"$mount" /Commit | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Failed to commit WIM changes" }
+  if ($LASTEXITCODE -ne 0) { throw "Failed to commit WIM changes (DISM exit $LASTEXITCODE)" }
   $Script:State.Mounted = $false
 
-  $outputPath = Join-Path $Script:Config.Paths.Output "$OutputISOName"
+  # ── 2. Verify ISO source layout ────────────────────────────────────────
+  $bootDir = Join-Path $isoSource 'boot'
+  $efiBoot = Join-Path $isoSource 'efi\microsoft\boot'
+  foreach ($dir in @($bootDir, $efiBoot)) {
+    if (-not (Test-Path $dir)) { throw "ISO source folder is missing required directory: $dir" }
+  }
+  $bootWim = Join-Path $isoSource 'sources\boot.wim'
+  if (-not (Test-Path $bootWim)) { throw "boot.wim not found at $bootWim" }
 
-  # Resolve boot sector files:
-  #   ADK mode (OSD)   → stored in $Script:Config.Tools by Get-WindowsAdkPaths
-  #   ISO mode fallback → extracted into the ISO source folder
-  if ($Script:Config.Tools.EtfsBootCom -and (Test-Path $Script:Config.Tools.EtfsBootCom)) {
-    $bootFile = $Script:Config.Tools.EtfsBootCom
+  # ── 3. Stage boot sector files into ISO source (OSD pattern) ──────────
+  #   oscdimg's -bootdata: paths must survive quoting — easier to stage them
+  #   inside the media tree so there are never spaces or special chars in the path.
+  $oscdimgDir         = Split-Path $Script:Config.Tools.OSCDIMG
+  $etfsbootcom_adk    = $Script:Config.Tools.EtfsBootCom
+  $efisys_adk         = Join-Path $oscdimgDir 'efisys.bin'
+  $efisysnoprompt_adk = $Script:Config.Tools.EfiSysNoprompt
+
+  $destEtfsboot  = Join-Path $bootDir 'etfsboot.com'
+  $destEfisys    = Join-Path $efiBoot 'efisys.bin'
+  $destEfisysNP  = Join-Path $efiBoot 'efisys_noprompt.bin'
+
+  if (-not (Test-Path $destEtfsboot)) {
+    if (-not (Test-Path $etfsbootcom_adk)) { throw "etfsboot.com not found at ADK path: $etfsbootcom_adk" }
+    Copy-Item $etfsbootcom_adk $bootDir -Force
+    Write-BuildLog "  Staged etfsboot.com from ADK" -Level Info
   } else {
-    $bootFile = Join-Path "$isoSource" "boot\etfsboot.com"
+    Write-BuildLog "  etfsboot.com already present in ISO source" -Level Info
   }
 
-  if ($Script:Config.Tools.EfiSysNoprompt -and (Test-Path $Script:Config.Tools.EfiSysNoprompt)) {
-    $efiFile = $Script:Config.Tools.EfiSysNoprompt
-  } else {
-    $efiFile = Join-Path "$isoSource" "efi\Microsoft\boot\efisys_noprompt.bin"
-    if (-not (Test-Path $efiFile)) { $efiFile = Join-Path "$isoSource" "efi\Microsoft\boot\efisys.bin" }
-  }
-
-  if (-not (Test-Path "$bootFile")) { throw "Boot sector file not found: $bootFile (checked ADK paths and ISO source folder)" }
-
-  $label = [System.IO.Path]::GetFileNameWithoutExtension($OutputISOName)
-  $argList = @("-m","-o","-u2","-udfver102","-l$label")
-
-  if (Test-Path "$efiFile") {
-    $bootData = ('-bootdata:2#p0,e,b"{0}"#pEF,e,b"{1}"' -f "$bootFile","$efiFile")
-    $argList += $bootData
-  } else {
-    $argList += "-b$bootFile"
-  }
-  $argList += @("$isoSource","$outputPath")
-
-  Write-BuildLog "Running OSCDIMG with arguments: $($argList -join ' ')" -Level Info
-  $oscdimgOutput = & $Script:Config.Tools.OSCDIMG $argList 2>&1
-  $oscdimgExit = $LASTEXITCODE
-
-  # Log OSCDIMG output for debugging
-  if ($oscdimgOutput) {
-    Write-BuildLog "OSCDIMG output:" -Level Info
-    $oscdimgOutput | ForEach-Object { Write-BuildLog "  $_" -Level Info }
-  }
-
-  if ($oscdimgExit -ne 0) {
-    $errorMsg = "OSCDIMG failed to create ISO (exit $oscdimgExit)"
-    if ($oscdimgOutput) {
-      $errorMsg += "`n`nOSCDIMG Output:`n" + ($oscdimgOutput -join "`n")
+  if (-not (Test-Path $destEfisys)) {
+    if (Test-Path $efisys_adk) {
+      Copy-Item $efisys_adk $efiBoot -Force
+      Write-BuildLog "  Staged efisys.bin from ADK" -Level Info
     }
-    throw $errorMsg
+  } else {
+    Write-BuildLog "  efisys.bin already present in ISO source" -Level Info
   }
 
-  return $outputPath
+  if (-not (Test-Path $destEfisysNP)) {
+    if (Test-Path $efisysnoprompt_adk) {
+      Copy-Item $efisysnoprompt_adk $efiBoot -Force
+      Write-BuildLog "  Staged efisys_noprompt.bin from ADK" -Level Info
+    }
+  } else {
+    Write-BuildLog "  efisys_noprompt.bin already present in ISO source" -Level Info
+  }
+
+  # ── 4. Build the ISO (OSD pattern: Start-Process to preserve inner quotes) ─
+  if (-not (Test-Path $outputDir)) {
+    New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+  }
+  if (Test-Path $isoFullName) {
+    Write-BuildLog "  Removing existing ISO: $isoFullName" -Level Info
+    Remove-Item $isoFullName -Force
+  }
+
+  $oscdimgexe     = $Script:Config.Tools.OSCDIMG
+  $isoLabelString = '-l"{0}"' -f $isoLabel
+
+  Write-BuildLog "  oscdimg: $oscdimgexe" -Level Info
+  Write-BuildLog "  source:  $isoSource"  -Level Info
+  Write-BuildLog "  output:  $isoFullName" -Level Info
+  Write-BuildLog "  label:   $isoLabel"   -Level Info
+
+  # Prefer efisys_noprompt.bin (no "press any key" prompt) — correct for unattended RAM OS
+  if (Test-Path $destEfisysNP) {
+    $bootDataString = '2#p0,e,b"{0}"#pEF,e,b"{1}"' -f $destEtfsboot, $destEfisysNP
+    Write-BuildLog "  EFI boot: efisys_noprompt.bin (no prompt)" -Level Info
+  } elseif (Test-Path $destEfisys) {
+    $bootDataString = '2#p0,e,b"{0}"#pEF,e,b"{1}"' -f $destEtfsboot, $destEfisys
+    Write-BuildLog "  EFI boot: efisys.bin (standard)" -Level Info
+  } else {
+    throw "No EFI boot sector file found in $efiBoot (tried efisys_noprompt.bin and efisys.bin)"
+  }
+
+  Write-BuildLog "  Running oscdimg..." -Level Info
+  # Use Start-Process (matches OSD's New-WindowsAdkISO) — preserves embedded quotes
+  # in -bootdata: argument that & operator would otherwise strip.
+  $process = Start-Process $oscdimgexe `
+    -ArgumentList @('-m', '-o', '-u2', "-bootdata:$bootDataString", '-u2', '-udfver102', $isoLabelString, "`"$isoSource`"", "`"$isoFullName`"") `
+    -PassThru -Wait -WindowStyle Hidden
+
+  if ($process.ExitCode -ne 0) {
+    throw "OSCDIMG failed with exit code $($process.ExitCode)"
+  }
+
+  if (-not (Test-Path $isoFullName)) {
+    throw "OSCDIMG reported success but ISO not found at: $isoFullName"
+  }
+
+  $isoItem = Get-Item $isoFullName
+  Write-BuildLog ("ISO created: {0} ({1:N1} MB)" -f $isoFullName, ($isoItem.Length / 1MB)) -Level Success
+  return $isoFullName
 }
 
 # ============================================
