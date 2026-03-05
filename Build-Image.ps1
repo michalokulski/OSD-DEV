@@ -225,11 +225,19 @@ $Script:AppSources = @{
   # Chrome++ (Chrome Plus) packaged as .7z; requires version.dll next to chrome.exe
   ChromePlus = "https://github.com/Bush2021/chrome_plus/releases/download/1.15.1/Chrome++_v1.15.1_x86_x64_arm64.7z"
 
-  # Get Chrome Installer Unpacked
-  # GitHub Source: https://github.com/Bush2021/chrome_installer
-  ChromeStandaloneFallback = "https://dl.google.com/release2/chrome/nuloamky47wcog6772kpqu2zyu_145.0.7632.160/145.0.7632.160_chrome_installer_uncompressed.exe"
-  ChromeStandaloneDirect = "https://github.com/Bush2021/chrome_installer/releases/download/145.0.7632.160/x64_145.0.7632.160_chrome_installer_uncompressed.exe"
-  ChromeInstallerUnpacked  = "https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26iid%3D%7B17AE9393-1804-430E-8967-BFC16616F2FA%7D%26lang%3Den%26browser%3D5%26usagestats%3D0%26appname%3DGoogle%2520Chrome%26needsadmin%3Dprefers%26ap%3D-arch_x64-statsdef_1%26installdataindex%3Dempty/chrome/install/ChromeStandaloneSetup64.exe"
+  # Chrome program files — these are 7-zip SFX archives, NOT installers.
+  # NEVER execute them as a process — that triggers a real Chrome install on the host.
+  # Always extract with 7z only.
+  #
+  # Source 1: Bush2021/chrome_installer on GitHub — pre-extracted Chrome wrapped as 7z SFX
+  #   Structure after extraction: Chrome-bin\<version>\chrome.exe
+  ChromeUnpackedSFX = "https://github.com/Bush2021/chrome_installer/releases/download/145.0.7632.160/x64_145.0.7632.160_chrome_installer_uncompressed.exe"
+  ChromeUnpackedSFX_CDN = "https://dl.google.com/release2/chrome/nuloamky47wcog6772kpqu2zyu_145.0.7632.160/145.0.7632.160_chrome_installer_uncompressed.exe"
+  #
+  # Source 2: PortableApps.com Google Chrome Portable — NSIS paf.exe, 7z-extractable.
+  #   Structure after extraction: App\Chrome-bin\<version>\chrome.exe
+  #   NEVER execute — always extract with 7z.
+  ChromePortableApps = "https://portableapps.com/downloading/?a=GoogleChromePortable&s=s&p=&d=pa&n=Google%20Chrome%20Portable&f=GoogleChromePortable_145.0.7632.160_online.paf.exe"
 
   # Dell WinPE 11 driver pack A08 (Dec 23, 2025)
   DellWinPEDrivers = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab"
@@ -1000,19 +1008,13 @@ function Assert-ChromePlusLayout {
   return $chrome.FullName
 }
 
-function Install-ChromeFromOfflineInstaller {
-  param([string]$Installer,[string]$Dest)
+# Extract Chrome program files from a 7z SFX archive (Bush2021 uncompressed.exe or PortableApps paf.exe).
+# IMPORTANT: These files must NEVER be executed as a process — doing so triggers a real Chrome
+# installation on the host machine. We extract with 7z only (treat as a plain archive).
+function Expand-ChromeArchive {
+  param([string]$Archive, [string]$Dest)
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  # Use /extract= first (correct for Chrome's NSIS offline installer); 7z as fallback
-  try {
-    Start-Process -FilePath $Installer -ArgumentList "/extract=`"$Dest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
-  } catch {
-    try {
-      Expand-7z -ArchivePath $Installer -Destination $Dest
-    } catch {
-      Write-BuildLog "Could not extract Chrome offline installer: $_" -Level "Warning"
-    }
-  }
+  Expand-7z -ArchivePath $Archive -Destination $Dest
 }
 
 function Get-Applications {
@@ -1095,43 +1097,90 @@ function Get-Applications {
     $chPath = Join-Path $apps "Chrome"
     Expand-7z -ArchivePath $cp7z -Destination $chPath
 
-    # If chrome.exe not found, try user-provided offline installer
+    # If chrome.exe not found in Chrome++ .7z, acquire Chrome program files separately.
+    # Chrome++ only ships version.dll (the patch); chrome.exe comes from a separate source.
+    # ALL sources below are extracted with 7z only — never executed as a process.
     if (-not (Find-ExeUnder -Root $chPath -ExeName 'chrome.exe')) {
-      $chromeAppDir = Join-Path $chPath "Chrome-bin"
+      Write-BuildLog "Chrome++ .7z does not contain chrome.exe — fetching Chrome program files..." -Level Info
+
+      # Stash the version.dll from Chrome++ before we start filling the directory
+      $versionDllSource = Find-ExeUnder -Root $chPath -ExeName 'version.dll'
+
+      $chromeFetched = $false
+
+      # ── Source A: user-supplied archive (highest priority) ──────────────
       if ($ChromeOfflineInstallerPath) {
-        Write-BuildLog "Extracting Chrome program files from offline installer..." -Level Info
-        Install-ChromeFromOfflineInstaller -Installer $ChromeOfflineInstallerPath -Dest $chromeAppDir
-      } else {
-        # Try downloading Chrome standalone installer as fallback
-        Write-BuildLog "Chrome++ .7z does not contain chrome.exe. Attempting to download Chrome standalone installer..." -Level "Warning"
-        $chromeInstaller = Join-Path $cache "chrome_installer.exe"
+        Write-BuildLog "Extracting Chrome from user-supplied archive (7z)..." -Level Info
+        Expand-ChromeArchive -Archive $ChromeOfflineInstallerPath -Dest $chPath
+        $chromeFetched = $true
+      }
+
+      # ── Source B: Bush2021/chrome_installer GitHub (7z SFX) ─────────────
+      # x64_<ver>_chrome_installer_uncompressed.exe = 7z SFX of pre-extracted Chrome.
+      # Structure after extraction: Chrome-bin\<version>\chrome.exe
+      if (-not $chromeFetched) {
+        $sfxCache = Join-Path $cache "chrome_sfx.exe"
         try {
-          if (-not (Test-Path $chromeInstaller)) {
-            Write-BuildLog "Downloading Chrome standalone installer (fallback)..." -Level Info
-            try {
-              Invoke-WebRequest -Uri $Script:AppSources.ChromeStandaloneFallback -OutFile $chromeInstaller -UseBasicParsing
-            } catch {
-              Write-BuildLog "Primary Chrome download failed, trying direct link..." -Level Warning
-              Invoke-WebRequest -Uri $Script:AppSources.ChromeStandaloneDirect -OutFile $chromeInstaller -UseBasicParsing
-            }
+          if (-not (Test-Path $sfxCache)) {
+            Write-BuildLog "Downloading Chrome SFX (Bush2021/chrome_installer, GitHub)..." -Level Info
+            Invoke-WebRequest -Uri $Script:AppSources.ChromeUnpackedSFX -OutFile $sfxCache -UseBasicParsing
           }
-          Write-BuildLog "Extracting Chrome from downloaded installer..." -Level Info
-          Install-ChromeFromOfflineInstaller -Installer $chromeInstaller -Dest $chromeAppDir
+          Write-BuildLog "Extracting Chrome SFX with 7z (no execution)..." -Level Info
+          Expand-ChromeArchive -Archive $sfxCache -Dest $chPath
+          $chromeFetched = $true
         } catch {
-          Write-BuildLog "Failed to download/extract Chrome: $_" -Level "Warning"
-          Write-BuildLog "Skipping Chrome++ integration (no chrome.exe available)" -Level "Warning"
-          return
+          Write-BuildLog "Bush2021 GitHub download failed: $_" -Level Warning
+          Remove-Item $sfxCache -Force -ErrorAction SilentlyContinue
         }
       }
-      
-      # Copy Chrome++ version.dll to the Chrome binary directory
-      $versionDllSource = Find-ExeUnder -Root $chPath -ExeName 'version.dll'
-      if ($versionDllSource) {
-        $chromeExeFound = Find-ExeUnder -Root $chromeAppDir -ExeName 'chrome.exe'
-        if ($chromeExeFound) {
-          $versionDllDest = Join-Path $chromeExeFound.Directory.FullName 'version.dll'
+
+      # ── Source C: Bush2021 CDN mirror (same 7z SFX, different host) ──────
+      if (-not $chromeFetched) {
+        $sfxCdn = Join-Path $cache "chrome_sfx_cdn.exe"
+        try {
+          if (-not (Test-Path $sfxCdn)) {
+            Write-BuildLog "Downloading Chrome SFX (CDN mirror)..." -Level Info
+            Invoke-WebRequest -Uri $Script:AppSources.ChromeUnpackedSFX_CDN -OutFile $sfxCdn -UseBasicParsing
+          }
+          Expand-ChromeArchive -Archive $sfxCdn -Dest $chPath
+          $chromeFetched = $true
+        } catch {
+          Write-BuildLog "CDN mirror download failed: $_" -Level Warning
+          Remove-Item $sfxCdn -Force -ErrorAction SilentlyContinue
+        }
+      }
+
+      # ── Source D: PortableApps GoogleChromePortable paf.exe (NSIS/7z) ───
+      # 7z extracts it to: App\Chrome-bin\<version>\chrome.exe
+      # NEVER executed — 7z archive extraction only.
+      if (-not $chromeFetched) {
+        $pafCache = Join-Path $cache "GoogleChromePortable.paf.exe"
+        try {
+          if (-not (Test-Path $pafCache)) {
+            Write-BuildLog "Downloading Chrome from PortableApps (paf.exe, 7z extract only)..." -Level Info
+            Invoke-WebRequest -Uri $Script:AppSources.ChromePortableApps -OutFile $pafCache -UseBasicParsing
+          }
+          Expand-ChromeArchive -Archive $pafCache -Dest $chPath
+          $chromeFetched = $true
+        } catch {
+          Write-BuildLog "PortableApps download failed: $_" -Level Warning
+          Remove-Item $pafCache -Force -ErrorAction SilentlyContinue
+        }
+      }
+
+      if (-not $chromeFetched -or -not (Find-ExeUnder -Root $chPath -ExeName 'chrome.exe')) {
+        Write-BuildLog "All Chrome sources exhausted — skipping Chrome++ integration" -Level Warning
+        Write-BuildLog "Tip: pass -ChromeOfflineInstallerPath to supply chrome.exe manually" -Level Warning
+        return
+      }
+
+      # ── Apply Chrome++ patch: place version.dll next to chrome.exe ───────
+      $chromeExeFound = Find-ExeUnder -Root $chPath -ExeName 'chrome.exe'
+      if ($versionDllSource -and $chromeExeFound) {
+        $versionDllDest = Join-Path $chromeExeFound.Directory.FullName 'version.dll'
+        if (-not (Test-Path $versionDllDest)) {
           Copy-Item $versionDllSource.FullName $versionDllDest -Force
-          Write-BuildLog "Chrome++ version.dll copied next to chrome.exe" -Level Info
+          Write-BuildLog "Chrome++ version.dll placed next to chrome.exe" -Level Info
         }
       }
     }
@@ -1145,11 +1194,9 @@ function Get-Applications {
     $ext = [System.IO.Path]::GetExtension("$ChromePortablePath").ToLower()
     if ($ext -eq ".zip") {
       Expand-Archive "$ChromePortablePath" "$chDest" -Force
-    } elseif ($ext -eq ".7z") {
+    } else {
+      # .7z, .exe (SFX), .paf.exe — all treated as 7z archives; never executed as a process
       Expand-7z -ArchivePath "$ChromePortablePath" -Destination "$chDest"
-    } elseif ($ext -eq ".exe") {
-      try { Start-Process -FilePath "$ChromePortablePath" -ArgumentList "/extract=`"$chDest`"" -Wait -WindowStyle Hidden -ErrorAction Stop }
-      catch { Expand-7z -ArchivePath "$ChromePortablePath" -Destination "$chDest" }
     }
     $chrome = Find-ExeUnder -Root $chDest -ExeName 'chrome.exe'
     if ($chrome) { $Script:Config.Apps.ChromeExe = $chrome.FullName }
