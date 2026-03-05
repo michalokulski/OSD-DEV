@@ -1269,85 +1269,32 @@ function Inject-AllApps {
 # ============================================
 # REGISTRY (minimal; no FBWF on by default)
 # ============================================
-function Invoke-RegLoad {
-  param([string]$Key, [string]$HivePath)
-  # Force-unload any stale handle from a prior crashed build, then load fresh.
-  reg unload $Key 2>$null | Out-Null
-  $out = reg load $Key $HivePath 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    throw "reg load $Key failed (exit $LASTEXITCODE): $out`nHive: $HivePath"
-  }
-}
-
-function Invoke-RegAdd {
-  param([string[]]$Args)
-  $out = & reg add @Args 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    Write-BuildLog "  reg add failed (exit $LASTEXITCODE): $out" -Level Warning
-    return $false
-  }
-  return $true
-}
-
 function Configure-SystemRegistry {
-  Write-BuildLog "Configuring Registry (minimal)…"
-  $mount = $Script:Config.Paths.Mount
+  # WinPE does not use Winlogon, registry context menus, or any offline-hive setting
+  # that can't be done more reliably via SET in startnet.cmd.
+  # JAVA_HOME / PATH are injected by Create-StartupScript instead.
+  # FBWF overlay size is the only remaining hive write — handled inline below.
+  if (-not $EnableFBWF) {
+    Write-BuildLog "Registry: no hive writes needed (env vars go into startnet.cmd)" -Level Info
+    return
+  }
 
-  $sysPath = Join-Path "$mount" "Windows\System32\config\SYSTEM"
-  $softPath = Join-Path "$mount" "Windows\System32\config\SOFTWARE"
+  Write-BuildLog "Configuring Registry (FBWF overlay size)…"
+  $mount   = $Script:Config.Paths.Mount
+  $sysPath = Join-Path $mount "Windows\System32\config\SYSTEM"
 
-  Invoke-RegLoad "HKLM\RAM_SYS" $sysPath
-  Invoke-RegLoad "HKLM\RAM_SW"  $softPath
+  # Force-unload any stale hive from a prior crashed build, then load fresh.
+  reg unload "HKLM\RAM_SYS" 2>&1 | Out-Null
+  $out = reg load "HKLM\RAM_SYS" $sysPath 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "reg load HKLM\RAM_SYS failed (exit $LASTEXITCODE): $out" }
 
   try {
-    # WinPE does not use Winlogon\Shell — clear it so nothing overrides startnet.cmd
-    Invoke-RegAdd @("HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon", "/v", "Shell", "/t", "REG_SZ", "/d", "", "/f") | Out-Null
-
-    if ($Script:Config.Apps.ContainsKey("Java")) {
-      $javaInstall = "X:\Program Files\PortableApps\Java"
-      $ok = Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "JAVA_HOME", "/t", "REG_SZ", "/d", $javaInstall, "/f")
-      # Append Java\bin to PATH so java.exe is callable without full path
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
-        Select-String 'REG_EXPAND_SZ|REG_SZ' |
-        ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
-      if ($existingPath) {
-        $ok = $ok -and (Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "$existingPath;$javaInstall\bin", "/f"))
-      } else {
-        $ok = $ok -and (Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "%SystemRoot%\System32;%SystemRoot%;$javaInstall\bin", "/f"))
-      }
-      Write-BuildLog "JAVA_HOME and PATH configured for Java" -Level $(if ($ok) { 'Success' } else { 'Warning' })
-    }
-
-    # Add 7-Zip to PATH
-    if ($Script:Config.Apps.ContainsKey("7-Zip")) {
-      $szInstall = "X:\Program Files\PortableApps\7-Zip"
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
-        Select-String 'REG_EXPAND_SZ|REG_SZ' |
-        ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
-      if ($existingPath) {
-        $ok = Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "$existingPath;$szInstall", "/f")
-      } else {
-        $ok = Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment", "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", "%SystemRoot%\System32;%SystemRoot%;$szInstall", "/f")
-      }
-      Write-BuildLog "7-Zip added to PATH" -Level $(if ($ok) { 'Success' } else { 'Warning' })
-    }
-
-    if ($IncludeExplorerPlus) {
-      Invoke-RegAdd @("HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP", "/ve", "/d", "Open with Explorer++", "/f") | Out-Null
-      Invoke-RegAdd @("HKLM\RAM_SW\Classes\Directory\shell\ExplorerPP\command", "/ve", "/d", "X:\Program Files\PortableApps\ExplorerPP\Explorer++.exe `"%1`"", "/f") | Out-Null
-    }
-
-    if ($EnableFBWF) {
-      # Set desired overlay size (enablement typically requires reboot; we don't force it here)
-      Invoke-RegAdd @("HKLM\RAM_SYS\ControlSet001\Control\FBWF", "/v", "OverlaySize", "/t", "REG_DWORD", "/d", "$RamdiskSizeMB", "/f") | Out-Null
-    }
-  }
-  finally {
+    $out = reg add "HKLM\RAM_SYS\ControlSet001\Control\FBWF" /v OverlaySize /t REG_DWORD /d $RamdiskSizeMB /f 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-BuildLog "  FBWF OverlaySize reg add failed: $out" -Level Warning }
+    else { Write-BuildLog "FBWF OverlaySize set to $RamdiskSizeMB MB" -Level Success }
+  } finally {
     reg unload "HKLM\RAM_SYS" 2>&1 | Out-Null
-    reg unload "HKLM\RAM_SW"  2>&1 | Out-Null
   }
-
-  Write-BuildLog "Registry configured" -Level "Success"
 }
 
 # ============================================
@@ -1384,6 +1331,16 @@ wpeutil DisableFirewall
 REM === WiFi Initialization (OSD) ===
 PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet -WirelessConnect } else { net start WlanSvc 2>nul; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
 '@
+  }
+
+  # Set environment variables (simpler and more reliable than offline hive editing)
+  if ($Script:Config.Apps.ContainsKey('Java')) {
+    $javaRuntime = 'X:\Program Files\PortableApps\Java'
+    $content += "`r`nSET JAVA_HOME=$javaRuntime`r`nSET PATH=%PATH%;$javaRuntime\bin`r`n"
+  }
+  if ($Script:Config.Apps.ContainsKey('7-Zip')) {
+    $szRuntime = 'X:\Program Files\PortableApps\7-Zip'
+    $content += "SET PATH=%PATH%;$szRuntime`r`n"
   }
 
   # Launch WinXShell (blocking — when WinXShell exits, WinPE shuts down)
