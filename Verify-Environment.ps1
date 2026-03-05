@@ -19,7 +19,7 @@ $errors = @()
 # ====================================
 # SYSTEM CHECKS
 # ====================================
-Write-Host "[1/7] System Requirements" -ForegroundColor Cyan
+Write-Host "[1/8] System Requirements" -ForegroundColor Cyan
 
 # Windows Version
 $osVersion = [System.Environment]::OSVersion.Version
@@ -73,7 +73,7 @@ Write-Host ""
 # ====================================
 # REQUIRED SCRIPTS
 # ====================================
-Write-Host "[2/7] Required Scripts" -ForegroundColor Cyan
+Write-Host "[2/8] Required Scripts" -ForegroundColor Cyan
 
 $scripts = @(
     'Build-Image.ps1',
@@ -89,9 +89,8 @@ foreach ($scriptName in $scripts) {
         Write-Host "  OK  $scriptName ($([math]::Round($size, 1)) KB)" -ForegroundColor Green
     }
     else {
-        Write-Host "  ERR $scriptName (NOT FOUND)" -ForegroundColor Red
-        $allGood = $false
-        $errors += "Missing script: $scriptName"
+        Write-Host "  WARN $scriptName (NOT FOUND)" -ForegroundColor Yellow
+        $warnings += "Missing script: $scriptName"
     }
 }
 
@@ -100,7 +99,20 @@ Write-Host ""
 # ====================================
 # POWERSHELL MODULES & DISM TOOLS
 # ====================================
-Write-Host "[3/7] PowerShell Modules & DISM" -ForegroundColor Cyan
+Write-Host "[3/8] PowerShell Modules & DISM" -ForegroundColor Cyan
+
+# OSD Module (strongly recommended)
+$osdModule = Get-Module OSD -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
+if ($osdModule) {
+    Write-Host "  OK  OSD Module: v$($osdModule.Version) installed" -ForegroundColor Green
+    Write-Host "       Enables: ADK detection, WiFi drivers, Dell drivers, OSD-in-WIM" -ForegroundColor Gray
+}
+else {
+    Write-Host "  WARN OSD Module: NOT INSTALLED" -ForegroundColor Yellow
+    Write-Host "       Install: Install-Module OSD -Force" -ForegroundColor Gray
+    Write-Host "       Required for: -UseWinRE, -IncludeWiFi, dynamic Dell drivers, ADK detection" -ForegroundColor Gray
+    $warnings += "OSD module not installed (required for WiFi + WinRE mode)"
+}
 
 # DISM
 $dismPath = Get-Command dism.exe -ErrorAction SilentlyContinue
@@ -156,6 +168,27 @@ if ($adkFound) {
         $allGood = $false
     }
 }
+elseif ($osdModule) {
+    # Use OSD registry-based ADK detection as fallback
+    try {
+        $adkPaths = Get-WindowsAdkPaths -ErrorAction Stop
+        if ($adkPaths -and $adkPaths.WinPEPath -and (Test-Path $adkPaths.WinPEPath)) {
+            Write-Host "  OK  WinPE Add-on: $($adkPaths.WinPEPath) (detected via OSD)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  ERR WinPE Add-on: NOT FOUND (checked registry via OSD)" -ForegroundColor Red
+            Write-Host "       Install: https://aka.ms/adk and the WinPE add-on" -ForegroundColor Gray
+            $errors += "Windows ADK WinPE add-on not installed"
+            $allGood = $false
+        }
+    }
+    catch {
+        Write-Host "  ERR WinPE Add-on: NOT FOUND" -ForegroundColor Red
+        Write-Host "       Install: https://aka.ms/adk and the WinPE add-on" -ForegroundColor Gray
+        $errors += "Windows ADK WinPE add-on not installed"
+        $allGood = $false
+    }
+}
 else {
     Write-Host "  ERR WinPE Add-on: NOT FOUND" -ForegroundColor Red
     Write-Host "       Install: https://aka.ms/adk and the WinPE add-on" -ForegroundColor Gray
@@ -168,7 +201,7 @@ Write-Host ""
 # ====================================
 # STALE MOUNT CHECK
 # ====================================
-Write-Host "[4/7] Stale Mount Check" -ForegroundColor Cyan
+Write-Host "[4/8] Stale Mount Check" -ForegroundColor Cyan
 
 $staleMounts = Get-WindowsImage -Mounted -ErrorAction SilentlyContinue
 if ($staleMounts) {
@@ -187,7 +220,7 @@ Write-Host ""
 # ====================================
 # NETWORK & DOWNLOAD URL REACHABILITY
 # ====================================
-Write-Host "[5/7] Network & Download URLs" -ForegroundColor Cyan
+Write-Host "[5/8] Network & Download URLs" -ForegroundColor Cyan
 
 # Basic internet check
 try {
@@ -207,7 +240,9 @@ catch {
 
 # Test critical download URLs used by Build-Image.ps1
 $urls = @(
-    @{ Name = "GitHub (Open-Shell, Chrome++, Explorer++, Semeru)"; Url = "https://github.com" },
+    @{ Name = "GitHub (WinXShell, Explorer++, Semeru, Chrome++)"; Url = "https://github.com" },
+    @{ Name = "PowerShell Gallery (OSD module)"; Url = "https://www.powershellgallery.com" },
+    @{ Name = "okieselbach (WirelessConnect.exe)"; Url = "https://github.com/okieselbach" },
     @{ Name = "Dell Drivers"; Url = "https://downloads.dell.com" },
     @{ Name = "7-Zip"; Url = "https://www.7-zip.org" }
 )
@@ -226,9 +261,58 @@ foreach ($entry in $urls) {
 Write-Host ""
 
 # ====================================
+# WINRE AVAILABILITY (for -UseWinRE mode)
+# ====================================
+Write-Host "[6/8] WinRE Availability (-UseWinRE mode)" -ForegroundColor Cyan
+
+$winreFound = $false
+
+try {
+    $reagentcOut = & reagentc /info 2>&1
+    $reagentcStr = ($reagentcOut -join " ")
+    if ($reagentcStr -match "Enabled") {
+        Write-Host "  OK  WinRE: Enabled (reagentc /info)" -ForegroundColor Green
+        $winreFound = $true
+
+        $winreLocations = @(
+            "$env:WINDIR\System32\Recovery\winre.wim",
+            "C:\Recovery\WindowsRE\winre.wim"
+        )
+        $wimPath = $winreLocations | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($wimPath) {
+            $wimSizeMB = [math]::Round((Get-Item $wimPath).Length / 1MB, 1)
+            Write-Host "  OK  winre.wim: $wimPath ($wimSizeMB MB)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  INFO winre.wim: Not found at default paths" -ForegroundColor Gray
+            Write-Host "       Build-Image.ps1 will search via reagentc /info at build time" -ForegroundColor Gray
+        }
+    }
+    elseif ($reagentcStr -match "Disabled") {
+        Write-Host "  WARN WinRE: Disabled on this system" -ForegroundColor Yellow
+        Write-Host "       To enable: reagentc /enable (may require reboot)" -ForegroundColor Gray
+        Write-Host "       NOTE: -UseWinRE mode cannot proceed without an enabled WinRE" -ForegroundColor Gray
+        $warnings += "WinRE disabled — run 'reagentc /enable' to use -UseWinRE mode"
+    }
+    else {
+        Write-Host "  INFO WinRE: Status unknown (non-standard reagentc output)" -ForegroundColor Gray
+    }
+}
+catch {
+    Write-Host "  WARN reagentc: Not available or failed — cannot verify WinRE state" -ForegroundColor Yellow
+    $warnings += "Could not check WinRE availability (reagentc failed)"
+}
+
+if (-not $winreFound) {
+    Write-Host "  INFO -UseWinRE mode may not be available; use -SourceISO mode as alternative" -ForegroundColor Gray
+}
+
+Write-Host ""
+
+# ====================================
 # CONFIGURATION PATHS
 # ====================================
-Write-Host "[6/7] Configuration Paths" -ForegroundColor Cyan
+Write-Host "[7/8] Configuration Paths" -ForegroundColor Cyan
 
 $defaultWorkRoot = "C:\Build"
 if (Test-Path $defaultWorkRoot) {
@@ -248,20 +332,30 @@ Write-Host ""
 # ====================================
 # BUILD-IMAGE.PS1 PARAMETER HINTS
 # ====================================
-Write-Host "[7/7] Build Script Reminders" -ForegroundColor Cyan
+Write-Host "[8/8] Build Script Reminders" -ForegroundColor Cyan
 
-Write-Host "  INFO Required params: -SourceISO <path> -WorkRoot <path>" -ForegroundColor Gray
+Write-Host "  INFO Two build modes available:" -ForegroundColor Gray
+Write-Host "       -UseWinRE  -WorkRoot <path>          (no ISO; WiFi auto-enabled)" -ForegroundColor Cyan
+Write-Host "       -SourceISO <path>  -WorkRoot <path>  (traditional ISO-based build)" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  INFO OSD module (strongly recommended):" -ForegroundColor Gray
+Write-Host "       Install-Module OSD -Force" -ForegroundColor Cyan
+Write-Host "       Enables: ADK auto-detection, Intel WiFi drivers, Dell driver catalog," -ForegroundColor Gray
+Write-Host "                OSD module in WinPE, Initialize-OSDCloudStartnet WiFi init" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  INFO WiFi support (-UseWinRE or -IncludeWiFi):" -ForegroundColor Gray
+Write-Host "       Injects: Auth DLLs + Intel WinPE driver + WirelessConnect.exe + OSD module" -ForegroundColor Gray
+Write-Host "       At boot: SSID selector launches automatically if machine is offline" -ForegroundColor Gray
+Write-Host ""
 Write-Host "  INFO Chrome++: Use -UseChromePlus AND -ChromeOfflineInstallerPath <path>" -ForegroundColor Gray
 Write-Host "       (Chrome++ .7z does NOT include chrome.exe; offline installer required)" -ForegroundColor Gray
 Write-Host "  INFO Java: IBM Semeru 8 downloaded; JAVA_HOME and PATH auto-configured" -ForegroundColor Gray
-Write-Host "  INFO Network: StartNet.cmd runs wpeinit + wpeutil InitializeNetwork" -ForegroundColor Gray
 
 Write-Host ""
 
 # ====================================
 # EXECUTION PERMISSIONS
 # ====================================
-Write-Host ""
 Write-Host "[Exec Policy]" -ForegroundColor Cyan
 $policy = Get-ExecutionPolicy -Scope Process
 if ($policy -eq 'Undefined') { $policy = Get-ExecutionPolicy }
@@ -290,9 +384,14 @@ if ($errors.Count -eq 0 -and $warnings.Count -eq 0) {
     Write-Host "" -ForegroundColor Green
     Write-Host "  READY TO BUILD  -  All checks passed" -ForegroundColor Green
     Write-Host "" -ForegroundColor Green
-    Write-Host "  Run:" -ForegroundColor Green
-    Write-Host "    .\Quick-Launch.ps1                         (Interactive menu)" -ForegroundColor Cyan
-    Write-Host "    .\Build-Image.ps1 -SourceISO <ISO> -WorkRoot <Path>" -ForegroundColor Cyan
+    Write-Host "  WinRE mode (recommended):" -ForegroundColor Green
+    Write-Host "    .\Build-Image.ps1 -UseWinRE -WorkRoot D:\Build" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Traditional ISO mode:" -ForegroundColor Green
+    Write-Host "    .\Build-Image.ps1 -SourceISO C:\Win11.iso -WorkRoot D:\Build" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Or use the interactive launcher:" -ForegroundColor Green
+    Write-Host "    .\Quick-Launch.ps1" -ForegroundColor Cyan
     Write-Host ""
 }
 elseif ($errors.Count -eq 0) {
@@ -302,8 +401,9 @@ elseif ($errors.Count -eq 0) {
     $warnings | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
     Write-Host ""
     Write-Host "  You can proceed:" -ForegroundColor Yellow
-    Write-Host "    .\Quick-Launch.ps1  (menu)" -ForegroundColor Cyan
-    Write-Host "    .\Build-Image.ps1 -SourceISO <ISO> -WorkRoot <Path>" -ForegroundColor Cyan
+    Write-Host "    .\Quick-Launch.ps1                                           (menu)" -ForegroundColor Cyan
+    Write-Host "    .\Build-Image.ps1 -UseWinRE -WorkRoot D:\Build               (WinRE mode)" -ForegroundColor Cyan
+    Write-Host "    .\Build-Image.ps1 -SourceISO C:\Win11.iso -WorkRoot D:\Build  (ISO mode)" -ForegroundColor Cyan
     Write-Host ""
 }
 else {
@@ -319,7 +419,8 @@ else {
     Write-Host "  Fix these issues first:" -ForegroundColor Red
     Write-Host "    1. Run PowerShell as Administrator" -ForegroundColor Gray
     Write-Host "    2. Ensure Windows 10 or later" -ForegroundColor Gray
-    Write-Host "    3. Verify all required scripts exist" -ForegroundColor Gray
+    Write-Host "    3. Install Windows ADK + WinPE add-on: https://aka.ms/adk" -ForegroundColor Gray
+    Write-Host "    4. Install OSD module: Install-Module OSD -Force" -ForegroundColor Gray
     Write-Host ""
 }
 

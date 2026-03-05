@@ -1,116 +1,270 @@
 # OSD WinPE/RAM OS Builder
 
-**Version:** 1.1  
+**Version:** 1.3  
 **Date:** March 2026  
 **Status:** Experimental
 
 ## Overview
 
 This repository provides scripts to build a custom Windows PE-based RAM OS with optional drivers, portable applications, and visual theming.  
-The current build pipeline is based on manual DISM and PowerShell scripting, with two main approaches:
+The build pipeline uses manual DISM/PowerShell scripting, enhanced with the [OSD PowerShell module](https://www.powershellgallery.com/packages/OSD) for ADK detection, driver catalog lookup, and WiFi support.
 
-- **Build-Image.ps1**: Modern, robust, and feature-rich RAM OS builder.  
-- **Build-Image-OldWay.ps1**: Legacy OSDCloud-based build using OSD module cmdlets.
+- **Build-Image.ps1**: Modern, robust RAM OS builder. Two base WIM modes: traditional Windows ISO or local WinRE WIM. WinXShell + optional Explorer++ shell — no Microsoft `explorer.exe`.
+- **Build-Image-Kimi.ps1**: Alternative build script (Explorer++ as primary shell + optional Open-Shell Start Menu).
+- **Build-Image-OldWay.ps1**: Legacy OSDCloud-based build using OSD module cmdlets directly.
 
 ## Scripts
 
 ### 1. Build-Image.ps1
 
-Advanced RAM OS builder.  
-- Converts a Windows ISO into a bootable WinPE-based RAM OS.
-- Supports driver injection (Dell WinPE 11 pack).
-- Portable app integration: Open-Shell, Explorer++, Chrome++ (with validation), IBM Semeru Java.
-- Java: `JAVA_HOME` set and `bin` appended to system `PATH` (callable without full path).
-- Semeru ZIP nested folder auto-flattened after extraction.
-- Chrome++: Gracefully skips if no `chrome.exe` available and no offline installer provided (warns instead of crashing).
-- Network initialization (`wpeutil InitializeNetwork`, `WaitForNetwork`, `DisableFirewall`) in StartNet.cmd for connectivity at boot.
-- Custom wallpaper and accent color support.
-- Robust ADK/WinPE add-on detection and logging.
-- UEFI and legacy boot support.
+Advanced RAM OS builder with two operating modes:
+
+#### Mode A — Traditional ISO (`-SourceISO`)
+- Mounts a Windows 10/11 ISO, extracts `boot.wim`, builds WinPE from ADK OC packages.
+- NetworkBootstrapping: wired only (`wpeinit` + `wpeutil InitializeNetwork`).
+- Optionally add WiFi with `-IncludeWiFi` (injects all 7 required DLLs + Intel WiFi drivers + OSD module).
+
+#### Mode B — WinRE base WIM (`-UseWinRE`, no ISO needed)
+- Uses the build machine's own `winre.wim` as the base (located via `System32\Recovery`, `\Recovery\WindowsRE`, or `reagentc /info`).
+- Copies ADK `amd64\Media` for the ISO structure; exports WinRE into `sources\boot.wim`.
+- Automatically enables full WiFi support — WinRE already contains `raschap`/`rastls` auth DLLs; only the 3 MDM DLLs + Intel WiFi drivers need to be injected.
+- `StartNet.cmd` invokes `Initialize-OSDCloudStartnet -WirelessConnect` → launches `WirelessConnect.exe` GUI SSID selector if not already online.
+
+#### Common features (both modes)
+- **No Microsoft `explorer.exe`** — shell is WinXShell (primary) + optional Explorer++ file manager, driven by `winpeshl.ini`.
+- ADK detection via OSD `Get-WindowsAdkPaths` (registry-based, reliable) with path-guessing fallback.
+- Dell WinPE driver injection via OSD `Save-WinPECloudDriver -CloudDriver Dell` (auto-latest URL) with hardcoded-URL CAB fallback.
+- Intel WiFi WinPE driver injection via OSD `Save-WinPECloudDriver -CloudDriver WiFi`.
+- OSD module saved into WinPE image (`Save-Module OSD`) so `Start-WinREWiFi` / `Initialize-OSDCloudStartnet` are available at boot.
+- Portable app integration: WinXShell, Explorer++ (optional), Chrome++ (with validation), IBM Semeru Java 8 (OpenJ9), 7-Zip.
+- Java: `JAVA_HOME` set and `bin` appended to system `PATH`.
+- 7-Zip: portable full installer injected and added to `PATH`.
+- Chrome++: validates `version.dll` co-location next to `chrome.exe`; graceful skip if unavailable.
+- Chrome launcher writes profile/cache to `X:\` (volatile RAM, cleared on reboot).
+- Custom wallpaper and DWM accent color support.
+- UEFI (`efisys_noprompt.bin`) and legacy boot (`etfsboot.com`) support; boot paths resolved from OSD or ISO source.
+- WIM index selection (`-WimIndex`: 1 = plain WinPE, 2 = WinPE+Setup; forced to 1 in WinRE mode).
+- Optional FBWF overlay OC (`-EnableFBWF`).
+
+**Parameters:**
+
+| Parameter | Required | Description |
+|---|---|---|
+| `-SourceISO` | ✅ (or `-UseWinRE`) | Path to Windows 10/11 ISO |
+| `-UseWinRE` | ✅ (or `-SourceISO`) | Use local `winre.wim` as base — no ISO needed. Auto-enables WiFi. |
+| `-WorkRoot` | ✅ | Build working directory (20 GB free required) |
+| `-IncludeWiFi` | | Inject WiFi support into a standard ISO-based build (DLLs + Intel drivers + WirelessConnect.exe + OSD module) |
+| `-UseChromePlus` | | Download & integrate Chrome++ |
+| `-ChromeOfflineInstallerPath` | | Path to Chrome offline installer `.exe` (needed with `-UseChromePlus`) |
+| `-ChromePortablePath` | | Alternate: local Chrome portable archive (`.zip`/`.7z`/`.exe`) |
+| `-IncludeExplorerPlus` | | Include Explorer++ file manager |
+| `-IncludeDellDrivers` | | Inject Dell WinPE 11 driver pack (OSD catalog, CAB fallback) |
+| `-WallpaperPath` | | Custom wallpaper image (`.jpg`/`.jpeg`/`.png`/`.bmp`) |
+| `-AccentColor` | | Hex RGB accent color (default: `0078D7`) |
+| `-OutputISOName` | | Output ISO filename (default: `RAMOS_Desktop.iso`) |
+| `-RamdiskSizeMB` | | Overlay size for FBWF (default: `4096`, range 1024–8192) |
+| `-ADKPath` | | Path to WinPE add-on (auto-detected via OSD or path-guessing if omitted) |
+| `-WimIndex` | | WIM index: `1` = WinPE, `2` = WinPE+Setup (default: `1`; forced `1` in WinRE mode) |
+| `-KeepMountedWIM` | | Preserve mounted WIM on failure (debug) |
+| `-SkipCleanup` | | Skip cleanup after build |
+| `-EnableFBWF` | | Add WinPE-FBWF optional component |
+
+**Usage Examples:**
+
+```powershell
+# WinRE mode — no ISO needed, WiFi auto-enabled
+.\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build"
+
+# WinRE mode with Dell drivers and Chrome
+.\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build" `
+  -IncludeDellDrivers -UseChromePlus `
+  -ChromeOfflineInstallerPath "C:\Downloads\ChromeStandaloneSetup64.exe"
+
+# Traditional ISO mode (wired only)
+.\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build"
+
+# Traditional ISO mode with WiFi added
+.\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build" `
+  -IncludeWiFi -IncludeDellDrivers -IncludeExplorerPlus `
+  -WallpaperPath "C:\Images\wallpaper.jpg"
+```
+
+> **Note on Chrome++:** When using `-UseChromePlus`, also pass `-ChromeOfflineInstallerPath` pointing to
+> Chrome's standalone offline installer (`.exe`). The Chrome++ `.7z` contains only `version.dll` (the patch DLL),
+> not the Chrome program files. The script will attempt a fallback download if no installer is provided.
+
+> **Note on WiFi:** WiFi requires the OSD module (`Install-Module OSD`) to be installed on the build machine.
+> Without it, Intel WiFi driver injection and `Save-Module OSD` into WinPE are skipped — WiFi DLLs and
+> `WirelessConnect.exe` are still injected, but adapter enumeration may fail on Intel hardware.
+
+### 2. Build-Image-Kimi.ps1
+
+Alternative RAM OS builder (Explorer++ primary shell edition).
+- Same no-`explorer.exe` philosophy as `Build-Image.ps1`, but **Explorer++ is the primary shell**.
+- Optional Open-Shell Start Menu (`-IncludeOpenShell`).
+- ADK detection targets `ProgramFiles(x86)` only (WinKits 10/11).
+- Separate state tracking for both WIM and ISO mounts; cleaner error recovery.
 
 **Usage Example:**
 ```powershell
-.\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build" -UseChromePlus -IncludeDellDrivers -IncludeExplorerPlus -ChromeOfflineInstallerPath "C:\Downloads\ChromeStandaloneSetup64.exe"
+.\Build-Image-Kimi.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build"
 ```
 
-> **Note:** When using `-UseChromePlus`, you should also pass `-ChromeOfflineInstallerPath` pointing to  
-> Chrome's standalone offline installer (`.exe`), because the Chrome++ `.7z` only contains the patch DLL  
-> (`version.dll`), not the Chrome program files themselves.
+### 3. Build-Image-OldWay.ps1
 
-See script comments for full parameter documentation.
-
-### 2. Build-Image-OldWay.ps1
-
-Legacy OSDCloud-based build using the OSD PowerShell module.  
-- Creates an OSDCloud template and workspace.
-- Customizes WinPE via OSDCloud cmdlets.
+Legacy OSDCloud-based build using the OSD PowerShell module.
+- Creates an OSDCloud template (`WinRE`) and workspace.
+- Customizes WinPE via `Edit-OSDCloudWinPE`.
+- No manual WIM mounting — relies entirely on OSD cmdlets.
 
 **Usage Example:**
 ```powershell
 .\Build-Image-OldWay.ps1
 ```
 
-### 3. Quick-Launch.ps1
+### 4. Quick-Launch.ps1
 
 Menu-driven launcher for common tasks:
-- Build RAM OS (calls Build-Image.ps1)
+- Build RAM OS (ISO mode or WinRE mode) — calls `Build-Image.ps1` interactively
+- Build RAM OS (legacy) — calls `Build-Image-OldWay.ps1`
 - Run environment verification
-- Clean build artifacts
+- Open output folder
+- Clean build artifacts (guidance)
 
-### 4. Verify-Environment.ps1
+**Usage:**
+```powershell
+.\Quick-Launch.ps1
+```
 
-Performs pre-flight checks:
+### 5. Verify-Environment.ps1
+
+Performs pre-flight checks before building:
 - OS version, admin rights, PowerShell version
-- Disk space
-- Required scripts
-- DISM, OSCDIMG, and Windows ADK WinPE add-on availability
+- Disk space (20 GB minimum)
+- Required scripts present
+- OSD module installation and version
+- DISM and OSCDIMG availability
+- Windows ADK + WinPE add-on detection
 - WinPE optional components folder
+- WinRE availability (`reagentc /info`) for `-UseWinRE` mode
 - Network connectivity and download URL reachability
-- Build parameter reminders (Chrome++ offline installer, Java PATH, network init)
+- Build parameter reminders
+
+**Usage:**
+```powershell
+.\Verify-Environment.ps1
+```
 
 ## Directory Structure
 
 ```
 OSD-DEV/
-├── Build-Image.ps1
-├── Build-Image-OldWay.ps1
-├── Quick-Launch.ps1
-├── Verify-Environment.ps1
-├── README.md
-└── .trunk/
+├── Build-Image.ps1           (Main RAM OS builder — ISO mode or WinRE mode)
+├── Build-Image-Kimi.ps1      (Alternative: Explorer++ primary shell edition)
+├── Build-Image-OldWay.ps1    (Legacy OSDCloud-based build)
+├── Quick-Launch.ps1          (Interactive menu launcher)
+├── Verify-Environment.ps1    (Pre-flight environment check)
+└── README.md
+```
+
+**Generated build output** (under `-WorkRoot`, e.g. `D:\Build`):
+
+```
+D:\Build\
+├── ISO_Source\               (ADK media or extracted source ISO contents)
+├── Mount_WIM\                (WIM mount point)
+├── Apps\                     (Downloaded portable apps)
+├── Cache\                    (Download cache — survives rebuilds)
+├── Temp\                     (Temporary extraction workspace)
+└── Output\
+    ├── RAMOS_Desktop.iso     (Final bootable ISO)
+    └── Build-<timestamp>.log (Full build transcript)
 ```
 
 ## Prerequisites
 
-- Windows 10/11 or Server 2019/2022
-- [Windows ADK](https://aka.ms/adk) + WinPE add-on installed
-- PowerShell 5.1+ (run as Administrator)
-- 20GB+ free disk space
-- Internet connection (for first build)
-- Chrome offline installer (`.exe`) if using `-UseChromePlus`
+- Windows 10/11 or Windows Server 2019/2022
+- [Windows ADK](https://aka.ms/adk) with **WinPE add-on** and **Deployment Tools** installed
+- PowerShell 5.1+ (run as **Administrator**)
+- [OSD module](https://www.powershellgallery.com/packages/OSD): `Install-Module OSD` — **strongly recommended**  
+  *(Required for: registry-based ADK detection, Intel WiFi driver injection, OSD module in WinPE, dynamic Dell driver URL)*
+- 20 GB+ free disk space on the build drive
+- Internet connection (first build downloads ~500 MB+)
+- Chrome offline installer (`.exe`) if using `-UseChromePlus` (recommended)
+- For `-UseWinRE`: WinRE must be enabled on the build machine (`reagentc /enable`)
+
+## Included Components (downloaded at build time)
+
+| Component | Version | Purpose |
+|---|---|---|
+| WinXShell | latest | Lightweight WinPE desktop shell |
+| IBM Semeru JRE 8 (OpenJ9) | 8u482-b08 (primary), 8u472-b08 (fallback) | Java runtime |
+| 7-Zip | 24.08 | Archiver (build-time extractor + injected into image) |
+| Explorer++ | 1.4.0 | Portable file manager (optional) |
+| Chrome++ (Chrome Plus) | 1.15.1 | Patched Chromium browser (optional) |
+| Dell WinPE 11 Drivers | OSD catalog (auto-latest), A08 fallback | Hardware drivers for Dell systems (optional) |
+| Intel Wireless WinPE Drivers | OSD catalog (auto-latest) | WiFi adapter drivers (with `-UseWinRE` / `-IncludeWiFi`) |
+| WirelessConnect.exe | latest | GUI SSID selector at boot (with `-UseWinRE` / `-IncludeWiFi`) |
+| OSD Module | installed version | PowerShell module saved into WinPE for boot-time WiFi init |
 
 ## Quick Start
 
-1. **Verify Environment**
-    ```powershell
-    .\Verify-Environment.ps1
-    ```
-2. **Build RAM OS**
-    ```powershell
-    .\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build"
-    ```
-3. **Burn ISO to USB** (Ventoy/Rufus) and boot.
+### Option A — WinRE mode (recommended, no ISO needed)
+
+```powershell
+# 1. Install OSD module (once)
+Install-Module OSD -Force
+
+# 2. Verify environment
+.\Verify-Environment.ps1
+
+# 3. Build
+.\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build" -IncludeDellDrivers
+```
+
+### Option B — Traditional ISO mode
+
+```powershell
+# 1. Install OSD module (once)
+Install-Module OSD -Force
+
+# 2. Verify environment
+.\Verify-Environment.ps1
+
+# 3. Build
+.\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build"
+```
+
+4. **Burn ISO to USB** (Ventoy / Rufus) or mount in VM and boot.
+
+5. **At boot:** WinPE loads into RAM (`X:\`). In WinRE mode, if not already connected to a wired network, `WirelessConnect.exe` presents an SSID selection GUI. Once the desktop appears, boot media can be ejected. All changes are volatile and lost on reboot.
+
+## WiFi — How It Works
+
+`StartNet.cmd` calls `Initialize-OSDCloudStartnet -WirelessConnect` (from the OSD module saved into WinPE):
+
+1. Skips WiFi if already online (wired DHCP succeeded)
+2. Checks `dmcmnutils.dll` is present (guard against missing DLLs)
+3. Starts `WlanSvc` if not running
+4. Detects WiFi adapter via `Get-SmbClientNetworkInterface`
+5. Optionally reads HP UEFI pre-provisioned WiFi credentials
+6. Launches `X:\Windows\WirelessConnect.exe` for GUI SSID selection, or falls back to text menu
+
+If the OSD module was not saved into WinPE (build machine had no OSD module), StartNet falls back to `net start WlanSvc` + direct launch of `WirelessConnect.exe`.
 
 ## Maintenance
 
-- Update URLs in `Build-Image.ps1` as needed for new app/driver versions.
-- Re-run `Verify-Environment.ps1` after Windows/ADK updates.
+- Update `$Script:AppSources` URLs in `Build-Image.ps1` when component versions change.
+- Update OSD module: `Update-Module OSD`
+- Re-run `Verify-Environment.ps1` after Windows updates or ADK reinstallation.
+- The `Cache\` folder under `-WorkRoot` preserves downloads between builds — delete it to force re-download.
+- For WinRE mode: if `winre.wim` is missing, run `reagentc /enable` and reboot.
 
 ## License
 
-- Scripts: MIT License
-- Windows PE: Microsoft License
-- Third-party apps: See respective licenses
+- Scripts: MIT License  
+- Windows PE: Microsoft License  
+- Third-party apps: See respective upstream licenses
 
 ---
 

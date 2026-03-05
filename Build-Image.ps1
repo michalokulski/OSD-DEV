@@ -1,18 +1,19 @@
 ﻿<#
 .SYNOPSIS
-Advanced RAM OS Builder with Hardware Support (Fixed & Validated)
-Creates a Windows PE-based RAM Operating System with Explorer shell, optional apps, Dell drivers, and visual theming.
+Advanced RAM OS Builder with Hardware Support
+Creates a WinPE-based RAM Operating System — optionally using the machine's own WinRE WIM as the base (WiFi-capable, no ISO needed).
 
 .DESCRIPTION
-Transforms a Windows ISO into a bootable RAM OS using WinPE. Highlights:
+Builds a bootable WinPE ISO with optional WinRE base WIM support. Highlights:
 - True RAM operation (WinPE runs from X:\; you can eject boot media after desktop loads)
+- WinRE base mode (-UseWinRE): uses local winre.wim — WiFi drivers & MDM DLLs already present
+- WiFi support via WirelessConnect.exe + 3 MDM DLLs (-IncludeWiFi, auto-enabled with -UseWinRE)
 - Dell WinPE11 drivers injected correctly (CAB extracted, INF drivers added)
-- Explorer shell with optional Open-Shell & Explorer++
+- WinXShell as primary lightweight shell + optional Explorer++ as file manager (no Microsoft explorer.exe)
 - Chrome++ (Chrome Plus) with repo-faithful validation (version.dll next to chrome.exe)
 - Chrome launcher puts profile/cache on X:\ (volatile)
+- ADK detection via OSD module (Get-WindowsAdkPaths) with registry fallback
 - Optional FBWF OC (off by default; not needed for eject-media)
-- Robust ADK + WinPE OC detection, safe cleanup, better logging
-- UEFI "no prompt" boot image if present
 
 .PARAMETER SourceISO
 Path to Windows 10/11 ISO (any edition)
@@ -63,17 +64,32 @@ Image index to mount in boot.wim (1=plain WinPE, 2=WinPE+Setup). Default: 1
 Add WinPE-FBWF OC (optional; typically not needed for eject-media)
 
 .EXAMPLE
-.\Build-RAMOS.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build" -UseChromePlus -IncludeDellDrivers -IncludeExplorerPlus -ChromeOfflineInstallerPath "C:\Downloads\ChromeStandaloneSetup64.exe"
+# Traditional mode (from ISO):
+.\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build" -UseChromePlus -IncludeDellDrivers -IncludeExplorerPlus
+
+.EXAMPLE
+# WinRE mode (no ISO needed — uses local winre.wim, WiFi included):
+.\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build" -UseChromePlus -IncludeDellDrivers
 
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)]
+  # Source ISO is required unless -UseWinRE is specified
+  [Parameter(Mandatory = $false)]
   [ValidateScript({
-      if (-not (Test-Path "$_")) { throw "Source ISO not found: $_" }
+      if ($_ -and -not (Test-Path "$_")) { throw "Source ISO not found: $_" }
       $true
     })]
-  [string]$SourceISO,
+  [string]$SourceISO = "",
+
+  # Use the machine's local winre.wim as base WIM instead of boot.wim from an ISO.
+  # Skips ISO extraction; boot files come from ADK media folder.
+  # Automatically enables WiFi support (-IncludeWiFi).
+  [Parameter(Mandatory = $false)] [switch]$UseWinRE,
+
+  # Inject WiFi support: copies 3 MDM DLLs from local System32 + downloads WirelessConnect.exe.
+  # Required DLLs: dmcmnutils.dll, mdmpostprocessevaluator.dll, mdmregistration.dll
+  [Parameter(Mandatory = $false)] [switch]$IncludeWiFi,
 
   [Parameter(Mandatory = $true)]
   [ValidateScript({
@@ -159,9 +175,24 @@ param(
 
 #Requires -RunAsAdministrator
 
+# Validate: need either -SourceISO or -UseWinRE
+if (-not $UseWinRE -and [string]::IsNullOrWhiteSpace($SourceISO)) {
+    throw "You must supply either -SourceISO <path> or -UseWinRE (to use the local machine's winre.wim)."
+}
+
 # ============================================
-# INITIALIZATION
+# OSD MODULE (optional but strongly recommended)
+# Provides: Get-WindowsAdkPaths, Add-7Zip2BootImage, etc.
+# Install: Install-Module OSD  /  Update-Module OSD
 # ============================================
+try {
+    Import-Module OSD -MinimumVersion '23.0.0' -ErrorAction Stop
+    $Script:OSDAvailable = $true
+    Write-Host "[Init] OSD module loaded ($(( Get-Module OSD).Version))" -ForegroundColor DarkGray
+} catch {
+    $Script:OSDAvailable = $false
+    Write-Host "[Init] OSD module not available — using built-in ADK detection fallback" -ForegroundColor Yellow
+}
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
@@ -203,6 +234,10 @@ $Script:AppSources = @{
   # Dell WinPE 11 driver pack A08 (Dec 23, 2025)
   DellWinPEDrivers = "https://downloads.dell.com/FOLDER14002062M/1/WinPE11.0-Drivers-A08-2V5TD.cab"
 
+  # WirelessConnect.exe — GUI Wi-Fi SSID selector for WinRE/WinPE by Oliver Kieselbach
+  # Placed at X:\Windows\WirelessConnect.exe; invoked by OSD Start-WinREWiFi -WirelessConnect
+  WirelessConnect = "https://github.com/okieselbach/Helpers/raw/master/WirelessConnect/WirelessConnect/bin/Release/WirelessConnect.exe"
+
   # Minimal 7-zip standalone extractor (build-time only)
   SevenZipMini = "https://www.7-zip.org/a/7zr.exe"
 
@@ -227,7 +262,8 @@ $Script:WinPEPackages = @(
   "WinPE-StorageWMI",
   "WinPE-DismCmdlets",
   "WinPE-FMAPI",
-  "WinPE-WiFi-Package",
+  "WinPE-WiFi-Package",  # ADK for Windows 10 package name
+  "WinPE-WiFi",           # ADK for Windows 11 alternate name; loop skips whichever .cab is absent
   "WinPE-SRT"
 )
 
@@ -296,7 +332,6 @@ function Initialize-BuildEnvironment {
     Cache = [System.IO.Path]::Combine($WorkRoot,"Cache")
     Output = [System.IO.Path]::Combine($WorkRoot,"Output")
     Temp = [System.IO.Path]::Combine($WorkRoot,"Temp")
-    Mount_Install = [System.IO.Path]::Combine($WorkRoot,"Mount_Install")
   }
 
   # Validate all paths before creating directories
@@ -322,115 +357,71 @@ function Initialize-BuildEnvironment {
 
   Start-Transcript -Path $Script:Config.LogFile -ErrorAction Stop | Out-Null
 
-  # Probe ADK + WinPE add-on
-  $progFiles86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-  $progFiles = [Environment]::GetEnvironmentVariable("ProgramFiles")
+  # -------------------------------------------------------
+  # ADK detection - prefer OSD module (registry-based),
+  # fall back to path-guessing if OSD is not installed.
+  # -------------------------------------------------------
+  if ($Script:OSDAvailable) {
+    Write-BuildLog "Using OSD Get-WindowsAdkPaths for ADK detection..." -Level Info
+    $adkPaths = Get-WindowsAdkPaths
+    if (-not $adkPaths) { throw "OSD Get-WindowsAdkPaths returned nothing. Check that Windows ADK is installed." }
 
-  Write-BuildLog "Detected ProgramFiles(x86): $progFiles86" -Level Info
-  Write-BuildLog "Detected ProgramFiles: $progFiles" -Level Info
-
-  # Build candidate paths explicitly to avoid pipeline issues
-  $candidate1 = $ADKPath
-  $candidate2 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86,"Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  $candidate3 = if ($progFiles86) { [System.IO.Path]::Combine($progFiles86,"Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  $candidate4 = if ($progFiles) { [System.IO.Path]::Combine($progFiles,"Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-  $candidate5 = if ($progFiles) { [System.IO.Path]::Combine($progFiles,"Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment") } else { $null }
-
-  Write-BuildLog "Candidate paths constructed: c1=$candidate1 | c2=$candidate2 | c3=$candidate3 | c4=$candidate4 | c5=$candidate5" -Level Info
-
-  # Filter candidates without using pipeline to avoid PowerShell unpacking strings with parentheses
-  $candidates = @()
-  foreach ($c in @($candidate1,$candidate2,$candidate3,$candidate4,$candidate5)) {
-    if ($c -and $c.Length -gt 3 -and (Test-Path $c)) {
-      # Check if already in array before adding (Select-Object -Unique)
-      if ($candidates -notcontains $c) {
-        $candidates += $c
-      }
+    $Script:Config.Tools = @{
+      DISM           = $adkPaths.dismexe
+      OSCDIMG        = $adkPaths.oscdimgexe
+      WinPEOCs       = $adkPaths.WinPEOCs
+      # Boot sector files — returned directly by OSD; stored for Build-FinalISO
+      EtfsBootCom    = $adkPaths.etfsbootcom
+      EfiSysNoprompt = $adkPaths.efisysnopromptbin
+      # ADK media root (amd64\Media) — used to build ISO source structure in WinRE mode
+      WinPEMedia     = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($adkPaths.WinPEOCs),"Media")
     }
-  }
+    Write-BuildLog "ADK via OSD: DISM=$($Script:Config.Tools.DISM)" -Level Info
+    Write-BuildLog "ADK via OSD: OSCDIMG=$($Script:Config.Tools.OSCDIMG)" -Level Info
+    Write-BuildLog "ADK via OSD: WinPEOCs=$($Script:Config.Tools.WinPEOCs)" -Level Info
+    Write-BuildLog "ADK via OSD: EtfsBootCom=$($Script:Config.Tools.EtfsBootCom)" -Level Info
+  } else {
+    Write-BuildLog "OSD unavailable — probing ADK paths by well-known locations..." -Level Warning
+    $progFiles86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+    $progFiles   = [Environment]::GetEnvironmentVariable("ProgramFiles")
 
-  Write-BuildLog "After filtering - Candidates count: $($candidates.Count)" -Level Info
-  if ($candidates.Count -gt 0) {
-    Write-BuildLog "First candidate after filter: [$($candidates[0])] | Type: $($candidates[0].GetType().Name)" -Level Info
-  }
-
-  if (-not $candidates -or $candidates.Count -eq 0) {
-    $msg = @"
-Windows ADK WinPE add-on not found in any standard location.
-
-REQUIRED: Install Windows Assessment and Deployment Kit (ADK) with WinPE:
-1. Download: https://aka.ms/adk
-2. Run the installer
-3. Select "Windows Preinstallation Environment (Windows PE)"
-4. Ensure "Deployment Tools" is also selected
-
-Locations checked:
-  - $progFiles86\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment
-  - $progFiles86\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment
-  - $progFiles\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment
-  - $progFiles\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment
-
-Or provide a custom path: -ADKPath "C:\Path\To\Windows Preinstallation Environment"
-"@
-    throw $msg
-  }
-
-  $winpeAddOn = $candidates[0]
-  Write-BuildLog "Variable winpeAddOn assigned: [$winpeAddOn]" -Level Info
-
-  $adkRoot = Split-Path -Path "$winpeAddOn" -Parent
-  Write-BuildLog "After Split-Path - adkRoot: [$adkRoot]" -Level Info
-
-  if ([string]::IsNullOrWhiteSpace($adkRoot)) {
-    throw "ADK Root path is empty after Split-Path. WinPE path was: '$winpeAddOn'"
-  }
-
-  Write-BuildLog "ADK Root detected: $adkRoot" -Level Info
-  Write-BuildLog "WinPE Add-On detected: $winpeAddOn" -Level Info
-
-  $Script:Config.Tools = @{
-    DISM = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\DISM\dism.exe")
-    OSCDIMG = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\Oscdimg\oscdimg.exe")
-    WinPEOCs = [System.IO.Path]::Combine($winpeAddOn,"amd64\WinPE_OCs")
-  }
-
-  Write-BuildLog "DISM path: $($Script:Config.Tools.DISM)" -Level Info
-  Write-BuildLog "OSCDIMG path: $($Script:Config.Tools.OSCDIMG)" -Level Info
-  Write-BuildLog "WinPE OCs path: $($Script:Config.Tools.WinPEOCs)" -Level Info
-
-  if (-not (Test-Path $Script:Config.Tools.DISM)) {
-    Write-BuildLog "DISM not found at: $($Script:Config.Tools.DISM) - trying PATH" -Level Warning
-    try {
-      $Script:Config.Tools.DISM = (Get-Command dism.exe -ErrorAction Stop).Source
-    } catch {
-      throw "DISM.exe not found. Ensure Windows ADK is installed or DISM is available in PATH"
+    $candidates = @()
+    foreach ($c in @(
+      $ADKPath,
+      (if ($progFiles86) { "$progFiles86\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment" }),
+      (if ($progFiles86) { "$progFiles86\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment" }),
+      (if ($progFiles)   { "$progFiles\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment" }),
+      (if ($progFiles)   { "$progFiles\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment" })
+    )) {
+      if ($c -and $c.Length -gt 3 -and (Test-Path $c) -and $candidates -notcontains $c) { $candidates += $c }
     }
-  }
 
-  if (-not (Test-Path $Script:Config.Tools.OSCDIMG)) {
-    Write-BuildLog "OSCDIMG not found at: $($Script:Config.Tools.OSCDIMG) - checking if file exists with Test-Path verbose" -Level Warning
-    try {
-      $Script:Config.Tools.OSCDIMG = (Get-Command oscdimg.exe -ErrorAction Stop).Source
-    } catch {
-      $msg = @"
-OSCDIMG.exe not found in ADK installation or PATH.
+    if (-not $candidates) {
+      throw "Windows ADK WinPE add-on not found. Install ADK from https://aka.ms/adk or install the OSD module (Install-Module OSD) for automatic detection."
+    }
 
-This tool is required to build the ISO image. The Windows ADK with WinPE must be installed.
+    $winpeAddOn = $candidates[0]
+    $adkRoot    = Split-Path -Path $winpeAddOn -Parent
+    if ([string]::IsNullOrWhiteSpace($adkRoot)) { throw "ADK Root path is empty after Split-Path. WinPE path was: '$winpeAddOn'" }
 
-To install ADK:
-1. Download from: https://aka.ms/adk
-2. Run the installer and select "Windows Preinstallation Environment (Windows PE)" option
-3. Ensure "Deployment Tools" is also selected for OSCDIMG.exe
+    Write-BuildLog "ADK Root (fallback): $adkRoot" -Level Info
 
-Alternatively, you can specify the ADK path using:
-  -ADKPath "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit"
+    $Script:Config.Tools = @{
+      DISM           = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\DISM\dism.exe")
+      OSCDIMG        = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\Oscdimg\oscdimg.exe")
+      WinPEOCs       = [System.IO.Path]::Combine($winpeAddOn,"amd64\WinPE_OCs")
+      EtfsBootCom    = $null   # will be resolved from ISO source at build time
+      EfiSysNoprompt = $null
+      WinPEMedia     = [System.IO.Path]::Combine($winpeAddOn,"amd64\Media")
+    }
 
-Current ADK candidates checked:
-  - $ADKPath
-  - `${env:ProgramFiles(x86)}\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment`
-  - `${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment`
-"@
-      throw $msg
+    if (-not (Test-Path $Script:Config.Tools.DISM)) {
+      try { $Script:Config.Tools.DISM = (Get-Command dism.exe -ErrorAction Stop).Source }
+      catch { throw "DISM.exe not found. Ensure Windows ADK is installed or DISM is in PATH." }
+    }
+    if (-not (Test-Path $Script:Config.Tools.OSCDIMG)) {
+      try { $Script:Config.Tools.OSCDIMG = (Get-Command oscdimg.exe -ErrorAction Stop).Source }
+      catch { throw "OSCDIMG.exe not found. Ensure Windows ADK is installed." }
     }
   }
 
@@ -454,13 +445,14 @@ function Invoke-Cleanup {
     $Script:State.Mounted = $false
   }
 
-  # Dismount ISO if still mounted
-  Get-DiskImage -ImagePath "$SourceISO" -ErrorAction SilentlyContinue | Dismount-DiskImage -ErrorAction SilentlyContinue | Out-Null
+  # Dismount ISO if still mounted (only applies to traditional ISO mode)
+  if (-not [string]::IsNullOrWhiteSpace($SourceISO) -and (Test-Path $SourceISO)) {
+    Get-DiskImage -ImagePath "$SourceISO" -ErrorAction SilentlyContinue | Dismount-DiskImage -ErrorAction SilentlyContinue | Out-Null
+  }
 
   if (-not $SkipCleanup) {
     Remove-Item $Script:Config.Paths.Apps -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $Script:Config.Paths.Temp -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $Script:Config.Paths.Mount_Install -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   Stop-Transcript -ErrorAction SilentlyContinue
@@ -469,25 +461,206 @@ function Invoke-Cleanup {
 # ============================================
 # ISO & WIM
 # ============================================
-function Mount-SourceISO {
-  Write-BuildLog "Mounting source ISO..."
 
-  Mount-DiskImage -ImagePath "$SourceISO" -ErrorAction Stop | Out-Null
-  $vol = Get-DiskImage -ImagePath "$SourceISO" | Get-Volume
-  $letter = $vol.DriveLetter
+# Locate the machine's own WinRE WIM (used when -UseWinRE is specified)
+function Get-WinRESource {
+  Write-BuildLog "Locating local winre.wim..."
 
-  if (-not (Test-Path "$letter`:\sources\boot.wim")) {
-    throw "Invalid ISO: sources\boot.wim not found"
+  # Primary well-known locations
+  $candidates = @(
+    "$env:SystemRoot\System32\Recovery\Winre.wim",
+    "$env:SystemDrive\Recovery\WindowsRE\Winre.wim"
+  )
+
+  foreach ($c in $candidates) {
+    if (Test-Path $c) {
+      Write-BuildLog "Found winre.wim: $c" -Level Success
+      return $c
+    }
   }
 
-  Write-BuildLog "Extracting ISO contents..."
-  $src = "$letter`:\"
-  $dst = $Script:Config.Paths.ISO
-  robocopy $src $dst /E /NFL /NDL /R:0 /W:0 /MT:8 | Out-Null
-  if ($LASTEXITCODE -gt 7) { throw "Robocopy failed with exit code: $LASTEXITCODE" }
+  # Fall back to reagentc /info output
+  Write-BuildLog "Querying reagentc for WinRE path..." -Level Info
+  try {
+    $reagentOut = & "$env:SystemRoot\System32\reagentc.exe" /info 2>&1
+    $wimLine = $reagentOut | Where-Object { $_ -match '\.wim' }
+    if ($wimLine -match '([A-Za-z]:\\[^\s]+\.wim|\\\\[^\s]+\.wim)') {
+      $path = $Matches[1] -replace '\\\\','\'
+      if (Test-Path $path) {
+        Write-BuildLog "Found winre.wim via reagentc: $path" -Level Success
+        return $path
+      }
+    }
+  } catch {}
 
-  Dismount-DiskImage -ImagePath "$SourceISO" | Out-Null
-  return [System.IO.Path]::Combine($Script:Config.Paths.ISO,"sources","boot.wim")
+  throw "Could not locate winre.wim on this machine.`nTry: reagentc /enable  (then reboot and re-run)."
+}
+
+# Prepare the WIM source and ISO media structure.
+# Modes:
+#   -UseWinRE : copies ADK Media + plants winre.wim as sources\boot.wim
+#   default   : mounts SourceISO, robocopy contents, returns path to boot.wim
+function Mount-SourceISO {
+
+  if ($UseWinRE) {
+    Write-BuildLog "WinRE mode: building ISO source from ADK media + local winre.wim..."
+
+    $media = $Script:Config.Tools.WinPEMedia
+    if (-not $media -or -not (Test-Path $media)) {
+      throw "ADK WinPE media folder not found: $media. Ensure Windows ADK is installed."
+    }
+
+    $dst = $Script:Config.Paths.ISO
+    Write-BuildLog "Copying ADK media structure from: $media" -Level Info
+    robocopy "$media" "$dst" /E /NFL /NDL /R:0 /W:0 /MT:8 | Out-Null
+    if ($LASTEXITCODE -gt 7) { throw "Robocopy of ADK media failed (exit $LASTEXITCODE)" }
+
+    # Export or copy winre.wim into sources\ as boot.wim
+    $winRESrc = Get-WinRESource
+    $bootWimDest = [System.IO.Path]::Combine($dst,"sources","boot.wim")
+    New-Item -ItemType Directory -Force -Path ([System.IO.Path]::Combine($dst,"sources")) | Out-Null
+
+    Write-BuildLog "Exporting winre.wim → sources\boot.wim (this may take a minute)..." -Level Info
+    # Export index 1 so the result is a standard single-image WIM
+    & $Script:Config.Tools.DISM /Export-Image /SourceImageFile:"$winRESrc" /SourceIndex:1 /DestinationImageFile:"$bootWimDest" /DestinationName:"WinRE" /Compress:max | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-BuildLog "DISM export failed, falling back to direct Copy-Item" -Level Warning
+      Copy-Item -LiteralPath $winRESrc -Destination $bootWimDest -Force
+    }
+
+    Write-BuildLog "WinRE WIM staged as sources\boot.wim" -Level Success
+    return $bootWimDest
+
+  } else {
+    Write-BuildLog "ISO mode: mounting source ISO..."
+
+    if ([string]::IsNullOrWhiteSpace($SourceISO)) { throw "-SourceISO is required when -UseWinRE is not specified." }
+    Mount-DiskImage -ImagePath "$SourceISO" -ErrorAction Stop | Out-Null
+    $vol = Get-DiskImage -ImagePath "$SourceISO" | Get-Volume
+    $letter = $vol.DriveLetter
+
+    if (-not (Test-Path "$letter`:\sources\boot.wim")) {
+      throw "Invalid ISO: sources\boot.wim not found"
+    }
+
+    Write-BuildLog "Extracting ISO contents..."
+    $src = "$letter`:\"
+    $dst = $Script:Config.Paths.ISO
+    robocopy $src $dst /E /NFL /NDL /R:0 /W:0 /MT:8 | Out-Null
+    if ($LASTEXITCODE -gt 7) { throw "Robocopy failed with exit code: $LASTEXITCODE" }
+
+    Dismount-DiskImage -ImagePath "$SourceISO" | Out-Null
+    return [System.IO.Path]::Combine($Script:Config.Paths.ISO,"sources","boot.wim")
+  }
+}
+
+# Inject WiFi support into the mounted WIM:
+#   - 3 MDM DLLs from local System32 (required by OSD Start-WinREWiFi)
+#   - WirelessConnect.exe (GUI SSID selector, runs from X:\Windows\WirelessConnect.exe)
+function Add-WiFiSupport {
+  Write-BuildLog "Injecting WiFi support..."
+  $mount  = $Script:Config.Paths.Mount
+  $sys32  = Join-Path $mount "Windows\System32"
+  $winDir = Join-Path $mount "Windows"
+
+  # ---------------------------------------------------------------
+  # DLL injection
+  # OSD Start-WinREWiFi checks 7 DLLs before enabling WiFi:
+  #   Required by all bases (MDM DLLs, not in bare WinPE or WinRE):
+  #     dmcmnutils.dll, mdmpostprocessevaluator.dll, mdmregistration.dll
+  #   Already present in WinRE but NOT in a bare ADK WinPE:
+  #     raschap.dll, raschapext.dll, rastls.dll, rastlsext.dll
+  # In WinRE mode the second group is already in the WIM.
+  # In plain WinPE mode (-IncludeWiFi without -UseWinRE) we need all 7.
+  # ---------------------------------------------------------------
+  $mdmDlls = @(
+    "dmcmnutils.dll",
+    "mdmpostprocessevaluator.dll",
+    "mdmregistration.dll"
+  )
+  $authDlls = @(
+    "raschap.dll",
+    "raschapext.dll",
+    "rastls.dll",
+    "rastlsext.dll"
+  )
+  # For bare WinPE we must inject all 7; for WinRE base the auth DLLs are already present
+  $dllsToInject = if ($UseWinRE) { $mdmDlls } else { $mdmDlls + $authDlls }
+
+  $dllsOk = 0
+  foreach ($dll in $dllsToInject) {
+    $src = Join-Path $env:SystemRoot "System32\$dll"
+    if (Test-Path $src) {
+      Copy-Item $src (Join-Path $sys32 $dll) -Force
+      $dllsOk++
+    } else {
+      Write-BuildLog "Missing on build machine: $dll  (WiFi may not function without it)" -Level Warning
+    }
+  }
+  Write-BuildLog "Copied $dllsOk / $($dllsToInject.Count) WiFi DLLs" -Level $(if ($dllsOk -eq $dllsToInject.Count) {'Success'} else {'Warning'})
+
+  # ---------------------------------------------------------------
+  # Intel Wireless WinPE Driver Pack
+  # OSD's '-CloudDriver WiFi' (or '*') downloads the latest Intel
+  # Wireless driver pack and injects the INF/SYS files.
+  # Without this, WlanSvc starts but no adapter is enumerated on
+  # Intel WiFi hardware (the most common chipset in enterprise HW).
+  # ---------------------------------------------------------------
+  if ($Script:OSDAvailable) {
+    Write-BuildLog "Downloading Intel Wireless WinPE driver pack via OSD catalog..." -Level Info
+    try {
+      $wifiDriverDir = Join-Path $Script:Config.Paths.Temp "WiFi-Drivers"
+      $wifiDriverPath = Save-WinPECloudDriver -CloudDriver WiFi -Path $wifiDriverDir
+      $wifiFullPath = if ($wifiDriverPath -is [string]) { $wifiDriverPath } else { $wifiDriverPath.FullName }
+      if ($wifiFullPath -and (Test-Path $wifiFullPath)) {
+        & $Script:Config.Tools.DISM /Add-Driver /Image:"$mount" /Driver:"$wifiFullPath" /Recurse /ForceUnsigned | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+          $infCount = (Get-ChildItem -Path $wifiFullPath -Filter *.inf -Recurse | Measure-Object).Count
+          Write-BuildLog "Injected Intel WiFi WinPE drivers ($infCount INF files)" -Level Success
+        } else {
+          Write-BuildLog "DISM /Add-Driver for Intel WiFi returned non-zero (exit $LASTEXITCODE)" -Level Warning
+        }
+      }
+    } catch {
+      Write-BuildLog "Intel WiFi driver pack failed: $_ (WiFi adapter may not enumerate)" -Level Warning
+    }
+  } else {
+    Write-BuildLog "OSD module not available — Intel WiFi drivers NOT injected. Install OSD (Install-Module OSD) to enable this." -Level Warning
+    Write-BuildLog "WiFi may still work if WinRE already contains the correct adapter driver." -Level Warning
+  }
+
+  # ---------------------------------------------------------------
+  # WirelessConnect.exe
+  # GUI SSID selector invoked by Start-WinREWiFi -WirelessConnect.
+  # Must live at X:\Windows\WirelessConnect.exe (exact path).
+  # ---------------------------------------------------------------
+  $wcCache = Join-Path $Script:Config.Paths.Cache "WirelessConnect.exe"
+  if (-not (Test-Path $wcCache)) {
+    Write-BuildLog "Downloading WirelessConnect.exe..." -Level Info
+    Invoke-WebRequest -Uri $Script:AppSources.WirelessConnect -OutFile $wcCache -UseBasicParsing
+  }
+  Copy-Item $wcCache (Join-Path $winDir "WirelessConnect.exe") -Force
+  Write-BuildLog "WirelessConnect.exe → X:\Windows\WirelessConnect.exe" -Level Success
+}
+
+# Save the OSD PowerShell module into the mounted WIM so that
+# Start-WinREWiFi and Initialize-OSDCloudStartnet are available at boot.
+function Add-OSDModuleToWIM {
+  Write-BuildLog "Saving OSD module into WinPE image..."
+  $mount = $Script:Config.Paths.Mount
+  $moduleDest = Join-Path $mount "Program Files\WindowsPowerShell\Modules"
+  New-Item -ItemType Directory -Force -Path $moduleDest | Out-Null
+
+  if ($Script:OSDAvailable) {
+    try {
+      Save-Module -Name OSD -Path $moduleDest -Force -ErrorAction Stop
+      Write-BuildLog "OSD module saved to WinPE (enables Start-WinREWiFi at boot)" -Level Success
+    } catch {
+      Write-BuildLog "Failed to save OSD module: $_ (WiFi connect prompt may not work)" -Level Warning
+    }
+  } else {
+    Write-BuildLog "OSD module not available on build machine — skipping injection" -Level Warning
+  }
 }
 
 function Mount-TargetWIM {
@@ -582,91 +755,54 @@ function Add-DellDrivers {
   if (-not $IncludeDellDrivers) { return }
 
   Write-BuildLog "Acquiring Dell WinPE11 drivers..."
+  $mount      = $Script:Config.Paths.Mount
+  $extractDir = [System.IO.Path]::Combine($Script:Config.Paths.Temp,"DellDrivers")
+  New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+
+  # Prefer OSD catalog (Get-DellWinPEDriverPack returns the current version URL dynamically)
+  if ($Script:OSDAvailable) {
+    Write-BuildLog "Using OSD Save-WinPECloudDriver -CloudDriver Dell (auto-latest URL)..." -Level Info
+    try {
+      $driverPath = Save-WinPECloudDriver -CloudDriver Dell -Path $extractDir
+      $driverFullPath = if ($driverPath -is [string]) { $driverPath } else { $driverPath.FullName }
+      if ($driverFullPath -and (Test-Path $driverFullPath)) {
+        & $Script:Config.Tools.DISM /Add-Driver /Image:"$mount" /Driver:"$driverFullPath" /Recurse /ForceUnsigned | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+          $Script:Config.Stats.DriversAdded += (Get-ChildItem -Path $driverFullPath -Filter *.inf -Recurse | Measure-Object).Count
+          Write-BuildLog "Injected $($Script:Config.Stats.DriversAdded) Dell INF drivers (OSD catalog)" -Level Success
+        } else {
+          Write-BuildLog "DISM /Add-Driver for Dell returned non-zero. Will try hardcoded CAB fallback." -Level Warning
+        }
+        return
+      }
+    } catch {
+      Write-BuildLog "OSD Save-WinPECloudDriver failed: $_ — falling back to hardcoded URL" -Level Warning
+    }
+  }
+
+  # Fallback: hardcoded CAB URL (pinned to last known-good version)
+  Write-BuildLog "Downloading Dell drivers from hardcoded URL..." -Level Info
   $dellCab = [System.IO.Path]::Combine($Script:Config.Paths.Cache,"Dell-WinPE11-Drivers.cab")
   if (-not (Test-Path $dellCab)) {
     try {
       Invoke-WebRequest -Uri $Script:AppSources.DellWinPEDrivers -OutFile $dellCab -UseBasicParsing
     } catch {
-      Write-BuildLog "Failed to download Dell drivers: $_" -Level "Warning"
+      Write-BuildLog "Failed to download Dell drivers: $_" -Level Warning
       return
     }
   }
 
   Write-BuildLog "Extracting and injecting Dell drivers..."
-  $extractDir = [System.IO.Path]::Combine($Script:Config.Paths.Temp,"DellDrivers")
-  New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
   & "$env:SystemRoot\System32\expand.exe" -F:* "$dellCab" "$extractDir" | Out-Null
 
   if (Test-Path $extractDir) {
-    & $Script:Config.Tools.DISM /Add-Driver /Image:$Script:Config.Paths.Mount /Driver:"$extractDir" /Recurse /ForceUnsigned | Out-Null
+    & $Script:Config.Tools.DISM /Add-Driver /Image:"$mount" /Driver:"$extractDir" /Recurse /ForceUnsigned | Out-Null
     if ($LASTEXITCODE -eq 0) {
       $Script:Config.Stats.DriversAdded = (Get-ChildItem -Path $extractDir -Filter *.inf -Recurse | Measure-Object).Count
-      Write-BuildLog "Injected $($Script:Config.Stats.DriversAdded) Dell INF drivers" -Level "Success"
+      Write-BuildLog "Injected $($Script:Config.Stats.DriversAdded) Dell INF drivers (hardcoded CAB)" -Level Success
     } else {
       Write-BuildLog "DISM /Add-Driver failed for Dell drivers" -Level Warning
     }
-  }
-}
-
-# ============================================
-# EXPLORER SHELL
-# ============================================
-function Add-ExplorerShell {
-  Write-BuildLog "Checking Explorer shell availability..."
-  $mount = $Script:Config.Paths.Mount
-  $explorerTarget = Join-Path $mount "Windows\explorer.exe"
-
-  if (Test-Path $explorerTarget) {
-    Write-BuildLog "Explorer.exe found in boot.wim" -Level "Success"
-    return
-  }
-
-  Write-BuildLog "Explorer.exe NOT found in boot.wim — extracting from install.wim..." -Level "Warning"
-  $installWim = Join-Path $Script:Config.Paths.ISO "sources\install.wim"
-  if (-not (Test-Path $installWim)) {
-    Write-BuildLog "install.wim not found in ISO source. Explorer shell will not be available." -Level "Error"
-    return
-  }
-
-  $mountInstall = $Script:Config.Paths.Mount_Install
-  if (-not (Test-Path $mountInstall)) { New-Item -ItemType Directory -Path $mountInstall -Force | Out-Null }
-
-  Write-BuildLog "Mounting install.wim (Index 1) for Explorer extraction..."
-  & $Script:Config.Tools.DISM /Mount-Image /ImageFile:"$installWim" /Index:1 /MountDir:"$mountInstall" /ReadOnly | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    Write-BuildLog "Failed to mount install.wim for Explorer extraction" -Level "Error"
-    return
-  }
-
-  try {
-    # Core Explorer shell files needed for a functional desktop in WinPE
-    $shellFiles = @(
-      "Windows\explorer.exe",
-      "Windows\System32\ExplorerFrame.dll",
-      "Windows\System32\twinui.dll",
-      "Windows\System32\twinui.pcshell.dll",
-      "Windows\System32\Windows.UI.Immersive.dll",
-      "Windows\System32\authui.dll",
-      "Windows\System32\StartTileData.dll",
-      "Windows\System32\InputHost.dll",
-      "Windows\System32\TextInputFramework.dll"
-    )
-
-    $copied = 0
-    foreach ($file in $shellFiles) {
-      $src = Join-Path $mountInstall $file
-      $dst = Join-Path $mount $file
-      if ((Test-Path $src) -and -not (Test-Path $dst)) {
-        $dstDir = Split-Path $dst -Parent
-        if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
-        Copy-Item $src $dst -Force
-        $copied++
-      }
-    }
-    Write-BuildLog "Copied $copied Explorer shell files from install.wim" -Level "Success"
-  }
-  finally {
-    & $Script:Config.Tools.DISM /Unmount-Image /MountDir:"$mountInstall" /Discard | Out-Null
   }
 }
 
@@ -712,12 +848,12 @@ function Assert-ChromePlusLayout {
 function Install-ChromeFromOfflineInstaller {
   param([string]$Installer,[string]$Dest)
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  # Use 7z extraction first (reliable for Chrome NSIS/stub installer); fall back to /extract
+  # Use /extract= first (correct for Chrome's NSIS offline installer); 7z as fallback
   try {
-    Expand-7z -ArchivePath $Installer -Destination $Dest
+    Start-Process -FilePath $Installer -ArgumentList "/extract=`"$Dest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
   } catch {
     try {
-      Start-Process -FilePath $Installer -ArgumentList "/extract=`"$Dest`"" -Wait -WindowStyle Hidden -ErrorAction Stop
+      Expand-7z -ArchivePath $Installer -Destination $Dest
     } catch {
       Write-BuildLog "Could not extract Chrome offline installer: $_" -Level "Warning"
     }
@@ -763,7 +899,7 @@ function Get-Applications {
       Expand-7z -ArchivePath $szExe -Destination $szDest
     }
   }
-  $Script:Config.Apps. '7-Zip' = $szDest
+  $Script:Config.Apps.'7-Zip' = $szDest
   Write-BuildLog "7-Zip prepared for injection" -Level "Success"
 
   # --- IBM Semeru Java (prefer latest; fallback to prior) ---
@@ -904,13 +1040,16 @@ function Configure-SystemRegistry {
   reg load "HKLM\RAM_SW" "$softPath" | Out-Null
 
   try {
-    reg add "HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
+    # Shell is driven entirely by winpeshl.ini (WinXShell + Explorer++); clear the registry value
+    reg add "HKLM\RAM_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d "" /f | Out-Null
 
     if ($Script:Config.Apps.ContainsKey("Java")) {
       $javaInstall = "C:\Program Files\PortableApps\Java"
       reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v JAVA_HOME /t REG_SZ /d "$javaInstall" /f | Out-Null
       # Append Java\bin to PATH so java.exe is callable without full path
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+','').Trim() })
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
+        Select-String 'REG_EXPAND_SZ|REG_SZ' |
+        ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
       if ($existingPath) {
         reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$javaInstall\bin" /f | Out-Null
       } else {
@@ -922,7 +1061,9 @@ function Configure-SystemRegistry {
     # Add 7-Zip to PATH
     if ($Script:Config.Apps.ContainsKey("7-Zip")) {
       $szInstall = "C:\Program Files\PortableApps\7-Zip"
-      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null | Where-Object { $_ -match 'REG_' } | ForEach-Object { ($_ -replace '^\s+\S+\s+REG_\S+\s+','').Trim() })
+      $existingPath = (reg query "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path 2>$null |
+        Select-String 'REG_EXPAND_SZ|REG_SZ' |
+        ForEach-Object { $_.Line -replace '^\s*\S+\s+REG_\S+\s+', '' }) -join ''
       if ($existingPath) {
         reg add "HKLM\RAM_SYS\ControlSet001\Control\Session Manager\Environment" /v Path /t REG_EXPAND_SZ /d "$existingPath;$szInstall" /f | Out-Null
       } else {
@@ -955,6 +1096,10 @@ function Configure-SystemRegistry {
 function Create-StartupScript {
   Write-BuildLog "Creating StartNet.cmd..."
   $mount = $Script:Config.Paths.Mount
+
+  $wifiEnabled = ($UseWinRE -or $IncludeWiFi)
+
+  # Base block: wpeinit + wired network init
   $content = @'
 @echo off
 echo ==========================================
@@ -962,17 +1107,39 @@ echo   RAM OS - Initializing WinPE
 echo ==========================================
 wpeinit
 
-REM Initialize network (wired adapters via DHCP)
+REM Initialize wired network (DHCP) and disable firewall
 wpeutil InitializeNetwork
 wpeutil WaitForNetwork
-
-REM Disable Windows Firewall to avoid blocking in WinPE
 wpeutil DisableFirewall
+'@
+
+  if ($wifiEnabled) {
+    # OSD Initialize-OSDCloudStartnet -WirelessConnect handles the full WiFi flow:
+    #   1. Checks if already online (Test-WebConnection google.com) — skips if wired is up
+    #   2. Verifies dmcmnutils.dll is present (guard for injected DLLs)
+    #   3. Starts WlanSvc if not running
+    #   4. Detects WiFi adapter via Get-SmbClientNetworkInterface
+    #   5. Checks HP UEFI for pre-provisioned WiFi profile (bonus for HP fleet)
+    #   6. Launches WirelessConnect.exe (X:\Windows\WirelessConnect.exe) for GUI SSID selection
+    #      OR uses a saved wifiProfile.xml for unattended connection
+    # This mirrors exactly what the user's working Edit-OSDCloudWinPE code produced.
+    $content += @'
+
+REM === WiFi Initialization ===
+REM OSD Initialize-OSDCloudStartnet: checks connectivity, starts WlanSvc,
+REM detects adapter, then launches WirelessConnect.exe for SSID selection.
+REM Falls back to inline WlanSvc start if OSD module is not in image.
+PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet -WirelessConnect } else { net start WlanSvc; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
+'@
+  }
+
+  $content += @'
 
 exit /b 0
 '@
+
   Set-Content -Path (Join-Path "$mount" "Windows\System32\StartNet.cmd") -Value $content -Force -Encoding ASCII
-  Write-BuildLog "StartNet.cmd created" -Level "Success"
+  Write-BuildLog "StartNet.cmd created$(if ($wifiEnabled) { ' (WiFi: Initialize-OSDCloudStartnet -WirelessConnect)' })" -Level "Success"
 }
 
 function Create-PostShellScript {
@@ -1037,30 +1204,28 @@ function Write-Winpeshl {
 
   $launch = @("[LaunchApps]")
 
-  # Verify explorer.exe exists in the image; fall back to cmd.exe
-  $explorerInWim = Join-Path $mount "Windows\explorer.exe"
-  if (Test-Path $explorerInWim) {
-    $launch += 'explorer.exe'
-  } else {
-    Write-BuildLog "explorer.exe not found in WIM — falling back to cmd.exe shell" -Level "Warning"
-    $launch += 'cmd.exe'
-  }
-
-  # Check in the mounted WIM, not the running system (PS 5.1 compatible — no ?. operator)
+  # Shell: WinXShell (primary) + Explorer++ (optional file manager); no Microsoft explorer.exe
   $mountedBase = Join-Path $mount "Program Files\PortableApps"
   $foundWX = Find-ExeUnder -Root (Join-Path $mountedBase "WinXShell") -ExeName "WinXShell.exe"
   $winxShellPath = if ($foundWX) { $foundWX.FullName } else { $null }
   $foundEP = Find-ExeUnder -Root (Join-Path $mountedBase "ExplorerPP") -ExeName "Explorer++.exe"
   $explorerPPPath = if ($foundEP) { $foundEP.FullName } else { $null }
 
-  # Convert to runtime paths (C:\ instead of mount path) — case-insensitive replace
+  # Primary shell: WinXShell
   if ($winxShellPath) {
     $winxShellPath = $winxShellPath -replace [regex]::Escape($mount),'C:'
     $launch += '"' + $winxShellPath + '"'
+    Write-BuildLog "WinXShell set as primary shell" -Level "Success"
+  } else {
+    Write-BuildLog "WinXShell not found in WIM — falling back to cmd.exe shell" -Level "Warning"
+    $launch += 'cmd.exe'
   }
+
+  # File manager: Explorer++ (optional)
   if ($IncludeExplorerPlus -and $explorerPPPath) {
     $explorerPPPath = $explorerPPPath -replace [regex]::Escape($mount),'C:'
     $launch += '"' + $explorerPPPath + '"'
+    Write-BuildLog "Explorer++ added as file manager" -Level "Success"
   }
 
   # If Chrome launcher exists, run it after Explorer so profile lives on X:\
@@ -1089,11 +1254,24 @@ function Build-FinalISO {
   $Script:State.Mounted = $false
 
   $outputPath = Join-Path $Script:Config.Paths.Output "$OutputISOName"
-  $bootFile = Join-Path "$isoSource" "boot\etfsboot.com"
-  $efiFile = Join-Path "$isoSource" "efi\Microsoft\boot\efisys_noprompt.bin"
-  if (-not (Test-Path $efiFile)) { $efiFile = Join-Path "$isoSource" "efi\Microsoft\boot\efisys.bin" }
 
-  if (-not (Test-Path "$bootFile")) { throw "Boot sector file not found: $bootFile" }
+  # Resolve boot sector files:
+  #   ADK mode (OSD)   → stored in $Script:Config.Tools by Get-WindowsAdkPaths
+  #   ISO mode fallback → extracted into the ISO source folder
+  if ($Script:Config.Tools.EtfsBootCom -and (Test-Path $Script:Config.Tools.EtfsBootCom)) {
+    $bootFile = $Script:Config.Tools.EtfsBootCom
+  } else {
+    $bootFile = Join-Path "$isoSource" "boot\etfsboot.com"
+  }
+
+  if ($Script:Config.Tools.EfiSysNoprompt -and (Test-Path $Script:Config.Tools.EfiSysNoprompt)) {
+    $efiFile = $Script:Config.Tools.EfiSysNoprompt
+  } else {
+    $efiFile = Join-Path "$isoSource" "efi\Microsoft\boot\efisys_noprompt.bin"
+    if (-not (Test-Path $efiFile)) { $efiFile = Join-Path "$isoSource" "efi\Microsoft\boot\efisys.bin" }
+  }
+
+  if (-not (Test-Path "$bootFile")) { throw "Boot sector file not found: $bootFile (checked ADK paths and ISO source folder)" }
 
   $label = [System.IO.Path]::GetFileNameWithoutExtension($OutputISOName)
   $argList = @("-m","-o","-u2","-udfver102","-l$label")
@@ -1136,11 +1314,21 @@ try {
   $bootWim = Mount-SourceISO
   try { Copy-Item $bootWim "$($bootWim).bak" -Force } catch {}
 
-  Mount-TargetWIM -WimPath "$bootWim" -Index $WimIndex
+  # WinRE WIM always has exactly one image index; user-supplied WimIndex applies to ISO mode only
+  $effectiveIndex = if ($UseWinRE) { 1 } else { $WimIndex }
+  Mount-TargetWIM -WimPath "$bootWim" -Index $effectiveIndex
 
   Add-WinPE-Packages
   Add-DellDrivers
-  Add-ExplorerShell
+
+  # WiFi support: inject MDM DLLs, Intel WiFi drivers, WirelessConnect.exe
+  # Automatically applied in WinRE mode; also triggered by explicit -IncludeWiFi
+  if ($UseWinRE -or $IncludeWiFi) {
+    Add-WiFiSupport
+    # Inject OSD module into WinPE so Initialize-OSDCloudStartnet / Start-WinREWiFi
+    # are available at boot time (required for the WiFi init in StartNet.cmd to work)
+    Add-OSDModuleToWIM
+  }
 
   Get-Applications
   Inject-AllApps
@@ -1162,6 +1350,7 @@ try {
   Write-Host "RAM OS Build Summary" -ForegroundColor Green
   Write-Host "=========================================" -ForegroundColor Green
   Write-Host "Output File: $finalIso" -ForegroundColor White
+  Write-Host "Base WIM: $(if ($UseWinRE) { 'WinRE (local winre.wim)' } else { 'WinPE (from ISO)' })" -ForegroundColor White
   Write-Host "Packages Added: $($Script:Config.Stats.Packages)" -ForegroundColor Gray
   Write-Host "Applications: $($Script:Config.Stats.Apps)" -ForegroundColor Gray
   Write-Host "Drivers (INF count): $($Script:Config.Stats.DriversAdded)" -ForegroundColor Gray
@@ -1170,6 +1359,7 @@ try {
   Write-Host "  [+] 7-Zip (injected + on PATH)" -ForegroundColor Gray
   Write-Host "  [+] IBM Semeru Java 8 (JAVA_HOME + on PATH)" -ForegroundColor Gray
   Write-Host "  [+] WinXShell (lightweight WinPE shell)" -ForegroundColor Gray
+  if ($UseWinRE -or $IncludeWiFi) { Write-Host "  [+] WiFi support (MDM DLLs, Intel WiFi drivers, WirelessConnect.exe, OSD module, WlanSvc at boot)" -ForegroundColor Gray }
   if ($UseChromePlus) { Write-Host "  [+] Chrome++ (Chrome Plus) with portable validation" -ForegroundColor Gray }
   if ($IncludeExplorerPlus) { Write-Host "  [+] Explorer++ File Manager" -ForegroundColor Gray }
   if ($IncludeDellDrivers) { Write-Host "  [+] Dell WinPE11 Drivers (INF injected)" -ForegroundColor Gray }
@@ -1184,10 +1374,7 @@ try {
 } catch {
   Write-BuildLog "BUILD FAILED: $_" -Level "Error"
   Write-BuildLog "Stack: $($_.ScriptStackTrace)" -Level "Error"
-  Invoke-Cleanup -Preserve:$KeepMountedWIM
   exit 1
 } finally {
-  if (-not $KeepMountedWIM) {
-    Invoke-Cleanup
-  }
+  Invoke-Cleanup -Preserve:$KeepMountedWIM
 }
