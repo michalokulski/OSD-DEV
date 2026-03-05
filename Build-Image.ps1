@@ -1507,7 +1507,14 @@ function Build-FinalISO {
     Write-BuildLog "  efisys_noprompt.bin already present in ISO source" -Level Info
   }
 
-  # ── 4. Build the ISO (OSD pattern: Start-Process to preserve inner quotes) ─
+  # ── 4. Scrub any non-media files from sources\ before packing ─────────────
+  #   (e.g. boot.wim.bak if someone ran a backup into the wrong directory)
+  Get-ChildItem (Join-Path $isoSource 'sources') -File | Where-Object { $_.Extension -notin @('.wim','.sdi','.efi','.cat','.inf','.dll') } | ForEach-Object {
+    Write-BuildLog "  Removing stray file from sources\: $($_.Name)" -Level Info
+    Remove-Item $_.FullName -Force
+  }
+
+  # ── 5. Build the ISO (OSD pattern: Start-Process to preserve inner quotes) ─
   if (-not (Test-Path $outputDir)) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
   }
@@ -1562,7 +1569,8 @@ try {
   Initialize-BuildEnvironment
 
   $bootWim = Mount-SourceISO
-  try { Copy-Item $bootWim "$($bootWim).bak" -Force } catch {}
+  # Backup the original WIM to Temp\ — NOT inside the ISO source tree (it would be packed into the ISO)
+  try { Copy-Item $bootWim (Join-Path $Script:Config.Paths.Temp 'boot.wim.bak') -Force } catch {}
 
   # WinRE WIM always has exactly one image index; user-supplied WimIndex applies to ISO mode only
   $effectiveIndex = if ($UseWinRE) { 1 } else { $WimIndex }
