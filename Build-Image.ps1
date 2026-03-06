@@ -1219,6 +1219,26 @@ function Get-Applications {
   $Script:Config.Apps.Java = $javaRoot
   Write-BuildLog "Note: IBM Semeru JDK adds ~175 MB to the WIM ramdisk. Ensure the boot target has at least 2 GB RAM." -Level Warning
 
+  # --- Sysinternals Suite ---
+  $sysDest = Join-Path $apps "SysinternalsSuite"
+  New-Item -ItemType Directory -Force -Path $sysDest | Out-Null
+  $sysZip = Join-Path $cache "SysinternalsSuite.zip"
+  if (-not (Test-Path $sysZip)) {
+    $scriptAppsDir = Join-Path (Split-Path -Parent $PSCommandPath) "Apps"
+    $manualSys = Get-ChildItem -Path $scriptAppsDir -Filter 'SysinternalsSuite*.zip' -ErrorAction SilentlyContinue |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($manualSys) {
+      Write-BuildLog "  Using local Sysinternals archive: $($manualSys.FullName)" -Level Info
+      Copy-Item $manualSys.FullName $sysZip -Force
+    } else {
+      throw ("SysinternalsSuite.zip not found in Apps\ folder and no download URL is configured.`n" +
+        "Manual fix: place a SysinternalsSuite*.zip archive in: $scriptAppsDir")
+    }
+  }
+  Expand-Archive $sysZip $sysDest -Force
+  $Script:Config.Apps.SysinternalsSuite = $sysDest
+  Write-BuildLog "Sysinternals Suite prepared for injection" -Level Success
+
   # --- Explorer++ portable ---
   # Per WinXShell author: Explorer++ must live in the SAME folder as WinXShell_x64.exe.
   # WinXShell.jcfg then references it via {JVAR_MODULEPATH}\explorer++.exe.
@@ -2108,6 +2128,10 @@ PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDC
   if ($Script:Config.Apps.ContainsKey('7-Zip')) {
     $szRuntime = 'X:\Program Files\PortableApps\7-Zip'
     $content += "SET PATH=%PATH%;$szRuntime`r`n"
+  }
+  if ($Script:Config.Apps.ContainsKey('SysinternalsSuite')) {
+    $sysRuntime = 'X:\Program Files\PortableApps\SysinternalsSuite'
+    $content += "SET PATH=%PATH%;$sysRuntime`r`n"
   }
 
   # Launch WinXShell (blocking — when WinXShell exits, WinPE shuts down)

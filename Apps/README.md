@@ -9,6 +9,7 @@ The build script checks this folder **before** hitting the internet, so any file
 | File(s) | Used for |
 |---------|----------|
 | `WinXShell*.7z` or `WinXShell*.zip` | WinXShell portable shell |
+| `SysinternalsSuite*.zip` | Sysinternals Suite (injected into `Program Files\PortableApps\SysinternalsSuite`, added to `PATH`) |
 
 ## How it works
 
