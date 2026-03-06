@@ -213,6 +213,7 @@ $Script:Config = @{
 # Latest stable sources (with fallbacks where useful)
 $Script:AppSources = @{
   # WinXShell - lightweight shell for WinPE (portable, no installation needed)
+  # Forum Source: http://bbs.wuyou.net/forum.php?mod=viewthread&tid=371541
   WinXShell = "https://www.theoven.org/download/file.php?id=129&sid=a690ad357e3aaa6c4ddc557b07396bae"
 
   # IBM Semeru (prefer latest 8u482; fallback to previously-used 8u472)
@@ -1051,16 +1052,24 @@ function Get-Applications {
   # Flatten to: Apps\WinXShell\WinXShell_x64.exe (find the dir containing the exe)
   $wxZip = Join-Path $cache "WinXShell.7z"
   if (-not (Test-Path $wxZip)) {
-    # The official URL embeds a forum session token that expires. Check for a manually-placed
-    # archive first (any WinXShell*.7z or *.zip already in the cache dir takes priority).
-    $manualWx = Get-ChildItem -Path $cache -Filter 'WinXShell*.7z' -ErrorAction SilentlyContinue |
-                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $manualWx) {
-      $manualWx = Get-ChildItem -Path $cache -Filter 'WinXShell*.zip' -ErrorAction SilentlyContinue |
+    # Search order:
+    #   1. OSD-DEV\Apps\ folder (next to the script) — place WinXShell archives here
+    #   2. Build cache dir (leftover from prior runs or manually placed)
+    #   3. Live download (URL contains a session token and may be expired)
+    $scriptAppsDir = Join-Path (Split-Path -Parent $PSCommandPath) "Apps"
+    $manualWx = $null
+    foreach ($searchDir in @($scriptAppsDir, $cache)) {
+      if (-not (Test-Path $searchDir)) { continue }
+      $manualWx = Get-ChildItem -Path $searchDir -Filter 'WinXShell*.7z' -ErrorAction SilentlyContinue |
                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      if (-not $manualWx) {
+        $manualWx = Get-ChildItem -Path $searchDir -Filter 'WinXShell*.zip' -ErrorAction SilentlyContinue |
+                      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      }
+      if ($manualWx) { break }
     }
     if ($manualWx) {
-      Write-BuildLog "  Using manually-placed WinXShell archive: $($manualWx.Name)" -Level Info
+      Write-BuildLog "  Using local WinXShell archive: $($manualWx.FullName)" -Level Info
       Copy-Item $manualWx.FullName $wxZip -Force
     } else {
       Write-BuildLog "  Downloading WinXShell (URL contains session token — may be expired)..." -Level Warning
@@ -1070,8 +1079,8 @@ function Get-Applications {
         Remove-Item $wxZip -Force -ErrorAction SilentlyContinue
         throw ("WinXShell download failed: $_`n`n" +
           "The download URL requires an active forum session token and may have expired.`n" +
-          "Manual fix: download WinXShell RC4 from https://www.theoven.org`n" +
-          "  then place the archive at: $wxZip")
+          "Manual fix: place a WinXShell*.7z archive in: $scriptAppsDir`n" +
+          "  (see $scriptAppsDir\README.md for details)")
       }
     }
   }
@@ -1170,13 +1179,29 @@ function Get-Applications {
   Write-BuildLog "Note: IBM Semeru JDK adds ~175 MB to the WIM ramdisk. Ensure the boot target has at least 2 GB RAM." -Level Warning
 
   # --- Explorer++ portable ---
+  # Per WinXShell author: Explorer++ must live in the SAME folder as WinXShell_x64.exe.
+  # WinXShell.jcfg then references it via {JVAR_MODULEPATH}\explorer++.exe.
+  # We do NOT register it as a separate PortableApps entry — it's a WinXShell plugin.
   if ($IncludeExplorerPlus) {
     $epZip = Join-Path $cache "ExplorerPP.zip"
     if (-not (Test-Path $epZip)) {
       Invoke-WebRequest -Uri $Script:AppSources.ExplorerPlusPlus -OutFile $epZip -UseBasicParsing
     }
-    Expand-Archive $epZip (Join-Path $apps "ExplorerPP") -Force
-    $Script:Config.Apps.ExplorerPP = Join-Path $apps "ExplorerPP"
+    # Extract to a temp location, find explorer++.exe, copy it into the WinXShell dir
+    $epTemp = Join-Path $Script:Config.Paths.Temp "ExplorerPP_extract"
+    Expand-Archive $epZip $epTemp -Force
+    $epExeItem = Get-ChildItem -Path $epTemp -Recurse -Filter 'explorerpp_x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $epExeItem) { $epExeItem = Get-ChildItem -Path $epTemp -Recurse -Filter 'explorer++.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if ($epExeItem) {
+      # Normalise to explorer++.exe — the name WinXShell.jcfg expects
+      $epDest = Join-Path $Script:Config.Apps.WinXShell 'explorer++.exe'
+      Copy-Item $epExeItem.FullName $epDest -Force
+      $Script:Config.Apps.ExplorerPPExe = $epDest
+      Write-BuildLog "Explorer++ copied into WinXShell folder: $epDest" -Level Success
+    } else {
+      Write-BuildLog "Explorer++ executable not found in ZIP — skipping" -Level Warning
+    }
+    Remove-Item $epTemp -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   # --- Chrome (Chrome++ or user-provided portable) ---
@@ -1297,47 +1322,66 @@ function Get-Applications {
 }
 
 function Create-WinXShellConfig {
-  # Writes a winxshell.jcfg into the WinXShell app staging directory so that
-  # WinXShell_x64.exe picks it up at boot.
-  # - desktop.path  → the folder whose .lnk files become desktop icons
-  # - wallpaper.path → background image (X:\ path after boot)
-  # Without this config WinXShell may default to a blank/unconfigured desktop.
-  Write-BuildLog "Creating WinXShell desktop configuration..."
+  # WinXShell ships its own winxshell.jcfg inside the archive — we must PATCH it,
+  # not replace it. Replacing with a custom schema silently breaks WinXShell because
+  # it uses proprietary keys (e.g. "::文件管理器", JVAR_MODULEPATH, etc.).
+  #
+  # What we patch:
+  #  1. Wallpaper path — set if -WallpaperPath supplied (key: "::壁纸": { "file":"..." })
+  #  2. Explorer++ integration — uncomment "::第3方文件管理器" line if explorer++.exe was
+  #     placed in the WinXShell folder (per author instructions).
+  #     Key to uncomment: "#::第3方文件管理器":"##{JVAR_MODULEPATH}\\explorer++.exe"
+  #     After patch:        "::第3方文件管理器":"{JVAR_MODULEPATH}\\explorer++.exe"
+  #
+  # If no jcfg is found in the extracted archive, we log a warning and skip — the
+  # bundled defaults will be used (WinXShell still works, just without our tweaks).
+  Write-BuildLog "Patching WinXShell configuration (winxshell.jcfg)..."
 
   $wxDest = $Script:Config.Apps.WinXShell
   if (-not $wxDest -or -not (Test-Path $wxDest)) {
-    Write-BuildLog "WinXShell directory not found — skipping config" -Level Warning
+    Write-BuildLog "WinXShell directory not found — skipping config patch" -Level Warning
     return
   }
 
-  # In WinPE, X:\Users\Public\Desktop is the reliable desktop folder regardless
-  # of which user profile WinPE creates at runtime.
-  $wallpaperRuntime = if ($WallpaperPath) { "X:\\Windows\\Web\\Wallpaper\\RAMOS\\custom.jpg" } else { "" }
-
-  # WinXShell RC4 reads winxshell.jcfg from the same directory as the .exe.
-  $jcfg = @"
-{
-  "taskbar": {
-    "position": "bottom",
-    "autohide": false,
-    "always_on_top": true,
-    "show_clock": true,
-    "show_tray": true
-  },
-  "desktop": {
-    "path": "X:\\\\Users\\\\Public\\\\Desktop",
-    "show_icons": true
-  },
-  "wallpaper": {
-    "path": "$wallpaperRuntime",
-    "style": "fill"
-  }
-}
-"@
-
   $configPath = Join-Path $wxDest "winxshell.jcfg"
-  Set-Content -Path $configPath -Value $jcfg -Encoding UTF8 -Force
-  Write-BuildLog "WinXShell config → winxshell.jcfg (desktop: X:\Users\Public\Desktop; wallpaper: $(if ($wallpaperRuntime) { $wallpaperRuntime } else { 'none' }))" -Level Success
+  if (-not (Test-Path $configPath)) {
+    Write-BuildLog "winxshell.jcfg not found in WinXShell archive — skipping patch (bundled defaults apply)" -Level Warning
+    return
+  }
+
+  $jcfgContent = Get-Content $configPath -Raw -Encoding UTF8
+
+  # ── Patch 1: Explorer++ — uncomment the third-party file manager line ─────
+  # Author's comment syntax: leading '#' on both the key and value makes it a comment.
+  # Uncommented form the author shows:  "::第3方文件管理器":"{JVAR_MODULEPATH}\\explorer++.exe"
+  if ($IncludeExplorerPlus -and $Script:Config.Apps.ExplorerPPExe) {
+    # Pattern covers both quote styles and possible whitespace
+    $jcfgContent = $jcfgContent -replace
+      '"#::第3方文件管理器"\s*:\s*"##\{JVAR_MODULEPATH\}\\\\explorer\+\+\.exe"',
+      '"::第3方文件管理器":"{JVAR_MODULEPATH}\\\\explorer++.exe"'
+    Write-BuildLog "  Explorer++ integration activated in winxshell.jcfg" -Level Info
+  }
+
+  # ── Patch 2: Wallpaper ────────────────────────────────────────────────────
+  # WinXShell uses "file" inside a "::壁纸" block.  The bundled jcfg typically
+  # has it blank or commented.  We do a best-effort replacement; if the key is
+  # absent we append a minimal block at the top-level JSON object.
+  if ($WallpaperPath) {
+    $wallpaperRuntime = 'X:\\Windows\\Web\\Wallpaper\\RAMOS\\custom.jpg'
+    # Try replacing an existing blank/commented file entry inside ::壁纸
+    $newWall = $jcfgContent -replace
+      '("::壁纸"\s*:\s*\{[^}]*"file"\s*:\s*)"[^"]*"',
+      "`$1`"$wallpaperRuntime`""
+    if ($newWall -ne $jcfgContent) {
+      $jcfgContent = $newWall
+      Write-BuildLog "  Wallpaper path set in winxshell.jcfg (::壁纸)" -Level Info
+    } else {
+      Write-BuildLog "  ::壁纸 block not found in jcfg — wallpaper will be applied via PostShell.cmd only" -Level Warning
+    }
+  }
+
+  Set-Content -Path $configPath -Value $jcfgContent -Encoding UTF8 -Force
+  Write-BuildLog "winxshell.jcfg patched successfully" -Level Success
 }
 
 function Inject-AllApps {
@@ -1347,7 +1391,10 @@ function Inject-AllApps {
   New-Item -Path $progFiles -ItemType Directory -Force | Out-Null
 
   foreach ($app in $Script:Config.Apps.GetEnumerator()) {
-    if ($app.Key -eq 'ChromeExe') { continue } # not a folder
+    # Skip entries that are file paths rather than app directories:
+    #   ChromeExe     — path to chrome.exe inside the Chrome folder (already covered by 'Chrome')
+    #   ExplorerPPExe — explorer++.exe was copied into the WinXShell folder; no separate dir to inject
+    if ($app.Key -in @('ChromeExe', 'ExplorerPPExe')) { continue }
     Write-BuildLog "Injecting: $($app.Key)"
     $dest = Join-Path $progFiles "$($app.Key)"
     New-Item -Path $dest -ItemType Directory -Force | Out-Null
@@ -1589,20 +1636,9 @@ function Create-DesktopShortcuts {
     &$createMultiLnk "Google Chrome" "cmd.exe" $chromeRuntime "/c `"X:\Windows\System32\RAMOS\StartChrome.cmd`""
   }
 
-  # Explorer++ Shortcut
-  if ($Script:Config.Apps.ExplorerPP) {
-    $epExe = Find-ExeUnder -Root $Script:Config.Apps.ExplorerPP -ExeName "Explorer++.exe"
-    if (-not $epExe) { $epExe = Find-ExeUnder -Root $Script:Config.Apps.ExplorerPP -ExeName "Explorer++_x64.exe" }
-    
-    if ($epExe) {
-      $buildAppsRoot = $Script:Config.Paths.Apps
-      $runtimeAppsRoot = "X:\Program Files\PortableApps"
-      $epRuntime = $epExe.FullName -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
-      
-      &$createMultiLnk "Explorer++" $epRuntime $epRuntime
-    }
-  }
 }
+# Note: Explorer++ desktop shortcut is not needed — WinXShell activates it via the
+# ::第3方文件管理器 entry in winxshell.jcfg (see Create-WinXShellConfig).
 
 function Write-Winpeshl {
   # OSD pattern: startnet.cmd launches WinXShell at the end — no winpeshl.ini needed.
@@ -1634,6 +1670,28 @@ function Build-FinalISO {
   & $Script:Config.Tools.DISM /Unmount-Image /MountDir:"$mount" /Commit | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to commit WIM changes (DISM exit $LASTEXITCODE)" }
   $Script:State.Mounted = $false
+
+  # ── 1b. Re-export with maximum compression ────────────────────────────
+  # After DISM /Commit, newly-added files (apps, drivers, packages) are stored
+  # as uncompressed delta blocks inside the WIM. The combined WIM can easily
+  # reach 900 MB+, which causes bootmgr to fail with "Not enough memory
+  # resources" when it tries to allocate that as a single contiguous ramdisk
+  # at early-boot time — even if the machine has plenty of physical RAM.
+  # Re-exporting with /Compress:recovery recompresses everything and typically
+  # cuts the WIM to 40-60% of its committed size, keeping it bootable.
+  $bootWimPath   = Join-Path $isoSource 'sources\boot.wim'
+  $bootWimReexp  = Join-Path $Script:Config.Paths.Temp 'boot_reexport.wim'
+  Write-BuildLog "  Re-exporting WIM with recovery compression (reduces boot ramdisk size)..." -Level Info
+  $beforeMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB, 1)
+  & $Script:Config.Tools.DISM /Export-Image /SourceImageFile:"$bootWimPath" /SourceIndex:1 /DestinationImageFile:"$bootWimReexp" /Compress:recovery | Out-Null
+  if ($LASTEXITCODE -eq 0 -and (Test-Path $bootWimReexp)) {
+    Move-Item -LiteralPath $bootWimReexp -Destination $bootWimPath -Force
+    $afterMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB, 1)
+    Write-BuildLog "  WIM size: ${beforeMB} MB → ${afterMB} MB (saved $([math]::Round($beforeMB - $afterMB, 1)) MB)" -Level Success
+  } else {
+    Write-BuildLog "  WIM re-export failed (exit $LASTEXITCODE) — ISO will use uncompressed WIM (may not boot on low-RAM machines)" -Level Warning
+    Remove-Item $bootWimReexp -Force -ErrorAction SilentlyContinue
+  }
 
   # ── 2. Verify ISO source layout ────────────────────────────────────────
   $bootDir = Join-Path $isoSource 'boot'
