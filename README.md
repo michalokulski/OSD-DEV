@@ -10,7 +10,6 @@ This repository provides scripts to build a custom Windows PE-based RAM OS with 
 The build pipeline uses manual DISM/PowerShell scripting, enhanced with the [OSD PowerShell module](https://www.powershellgallery.com/packages/OSD) for ADK detection, driver catalog lookup, and WiFi support.
 
 - **Build-Image.ps1**: Modern, robust RAM OS builder. Two base WIM modes: traditional Windows ISO or local WinRE WIM. WinXShell + optional Explorer++ shell — no Microsoft `explorer.exe`.
-- **Build-Image-Kimi.ps1**: Alternative build script (Explorer++ as primary shell + optional Open-Shell Start Menu).
 - **Build-Image-OldWay.ps1**: Legacy OSDCloud-based build using OSD module cmdlets directly.
 
 ## Scripts
@@ -38,9 +37,10 @@ Advanced RAM OS builder with two operating modes:
 - Dell WinPE driver injection via OSD `Save-WinPECloudDriver -CloudDriver Dell` (auto-latest URL) with hardcoded-URL CAB fallback.
 - Intel WiFi WinPE driver injection via OSD `Save-WinPECloudDriver -CloudDriver WiFi`.
 - OSD module saved into WinPE image (`Save-Module OSD`) so `Start-WinREWiFi` / `Initialize-OSDCloudStartnet` are available at boot.
-- Portable app integration: WinXShell, Explorer++ (optional), Chrome++ (with validation), IBM Semeru Java 8 (OpenJ9), 7-Zip.
+- Portable app integration: WinXShell, Explorer++ (optional), Chrome++ (with validation), IBM Semeru Java 8 (OpenJ9), 7-Zip, Sysinternals Suite.
 - Java: `JAVA_HOME` set and `bin` appended to system `PATH` via `StartNet.cmd`.
 - 7-Zip: portable full installer injected and added to `PATH`.
+- Sysinternals Suite: injected into `Program Files\PortableApps\SysinternalsSuite` and added to `PATH` — place `SysinternalsSuite*.zip` in `Apps\`.
 - Chrome++: validates `version.dll` co-location next to `chrome.exe`; multiple automatic fallback sources (Bush2021 GitHub SFX → CDN mirror → PortableApps paf.exe); graceful skip if all sources fail.
 - Chrome shortcut targets `cmd.exe /c StartChrome.cmd` (shell-agnostic, works from WinXShell desktop).
 - Chrome launcher writes profile/cache to `X:\` (volatile RAM, cleared on reboot).
@@ -57,10 +57,10 @@ Advanced RAM OS builder with two operating modes:
 |---|---|---|
 | `-SourceISO` | ✅ (or `-UseWinRE`) | Path to Windows 10/11 ISO |
 | `-UseWinRE` | ✅ (or `-SourceISO`) | Use local `winre.wim` as base — no ISO needed. Auto-enables WiFi. |
-| `-WorkRoot` | ✅ | Build working directory (20 GB free required) |
 | `-IncludeWiFi` | | Inject WiFi support into a standard ISO-based build (7 DLLs + Intel drivers + WirelessConnect.exe + OSD module) |
+| `-WorkRoot` | ✅ | Build working directory (20 GB free required) |
 | `-UseChromePlus` | | Download & integrate Chrome++ |
-| `-ChromeOfflineInstallerPath` | | Path to Chrome offline installer `.exe` — used as the first Chrome source if provided |
+| `-ChromeOfflineInstallerPath` | | Path to Chrome offline installer (`.exe`/`.zip`/`.7z`) — used as the first Chrome source if provided |
 | `-ChromePortablePath` | | Alternate: local Chrome portable archive (`.zip`/`.7z`/`.exe`) |
 | `-IncludeExplorerPlus` | | Include Explorer++ file manager |
 | `-IncludeDellDrivers` | | Inject Dell WinPE 11 driver pack (OSD catalog, CAB fallback) |
@@ -69,9 +69,9 @@ Advanced RAM OS builder with two operating modes:
 | `-OutputISOName` | | Output ISO filename (default: `RAMOS_Desktop.iso`) |
 | `-RamdiskSizeMB` | | Overlay size for FBWF (default: `4096`, range 1024–8192) |
 | `-ADKPath` | | Path to WinPE add-on (auto-detected via OSD or path-guessing if omitted) |
-| `-WimIndex` | | WIM index: `1` = WinPE, `2` = WinPE+Setup (default: `1`; forced `1` in WinRE mode) |
 | `-KeepMountedWIM` | | Preserve mounted WIM on failure (debug) |
 | `-SkipCleanup` | | Skip cleanup after build |
+| `-WimIndex` | | WIM index: `1` = WinPE, `2` = WinPE+Setup (default: `1`; forced `1` in WinRE mode) |
 | `-EnableFBWF` | | Add WinPE-FBWF optional component |
 | `-EnhanceFromISO` | | Windows ISO containing `install.wim` to inject from. In ISO mode, auto-detected from `-SourceISO`. In WinRE mode, required to enable enhancement. |
 | `-InstallWimIndex` | | Index inside `install.wim` to use (default: `1`) |
@@ -83,30 +83,45 @@ Advanced RAM OS builder with two operating modes:
 **Usage Examples:**
 
 ```powershell
-# WinRE mode — no ISO needed, WiFi auto-enabled
+# Minimal WinRE mode — no ISO needed, WiFi auto-enabled
 .\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build"
 
-# WinRE mode with Dell drivers, Chrome, and Explorer++
+# WinRE mode with common extras
 .\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build" `
   -IncludeDellDrivers -UseChromePlus -IncludeExplorerPlus
 
-# Traditional ISO mode (wired only)
+# Full WinRE build — every useful flag enabled (recommended)
+.\Build-Image.ps1 `
+  -UseWinRE `
+  -WorkRoot "D:\Build" `
+  -EnhanceFromISO "C:\Win11.iso" `
+  -InstallWimIndex 1 `
+  -IncludeWiFi `
+  -IncludeDellDrivers `
+  -UseChromePlus `
+  -IncludeExplorerPlus `
+  -IncludeWoW64 `
+  -IncludeAudio `
+  -IncludeShell `
+  -WallpaperPath "C:\Images\wallpaper.jpg" `
+  -AccentColor "0078D7" `
+  -OutputISOName "RAMOS_Full.iso" `
+  -ScratchSpaceMB 512
+
+# Traditional ISO mode — wired only, minimal
 .\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build"
 
-# Traditional ISO mode with WiFi added
+# Traditional ISO mode with WiFi, drivers, and wallpaper
 .\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build" `
   -IncludeWiFi -IncludeDellDrivers -IncludeExplorerPlus `
   -WallpaperPath "C:\Images\wallpaper.jpg"
 
-# Full-featured ISO mode with ADK Enhancement (richest output — Chrome, Java, WoW64, audio)
+# Full ISO mode — ADK Enhancement + all optional components
 .\Build-Image.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build" `
   -UseChromePlus -IncludeExplorerPlus -IncludeDellDrivers `
-  -IncludeWoW64 -IncludeAudio
-
-# WinRE mode + ADK Enhancement (supply a Windows ISO for the install.wim component source)
-.\Build-Image.ps1 -UseWinRE -WorkRoot "D:\Build" `
-  -EnhanceFromISO "C:\Win11.iso" -IncludeWoW64 `
-  -UseChromePlus -IncludeDellDrivers
+  -IncludeWoW64 -IncludeAudio -IncludeShell `
+  -WallpaperPath "C:\Images\wallpaper.jpg" `
+  -OutputISOName "RAMOS_Full.iso"
 ```
 
 > **Note on Chrome++:** `-ChromeOfflineInstallerPath` is optional. The script automatically tries 4 sources for the Chrome program files: user-supplied archive → Bush2021 GitHub SFX → CDN mirror → PortableApps paf.exe. All sources are extracted with 7-Zip only — never executed as a process.
@@ -115,20 +130,9 @@ Advanced RAM OS builder with two operating modes:
 
 > **Note on WinXShell:** The official download URL embeds a forum session token that expires. Place a `WinXShell*.7z` or `WinXShell*.zip` archive directly in the `Apps\` folder (next to the script) to use it without downloading. See [Apps/README.md](Apps/README.md).
 
-### 2. Build-Image-Kimi.ps1
+> **Note on Sysinternals Suite:** No automatic download URL is configured. Place `SysinternalsSuite.zip` (or any `SysinternalsSuite*.zip`) in the `Apps\` folder before building — the script will abort with a clear error if it is missing.
 
-Alternative RAM OS builder (Explorer++ primary shell edition).
-- Same no-`explorer.exe` philosophy as `Build-Image.ps1`, but **Explorer++ is the primary shell**.
-- Optional Open-Shell Start Menu (`-IncludeOpenShell`).
-- ADK detection targets `ProgramFiles(x86)` only (WinKits 10/11).
-- Separate state tracking for both WIM and ISO mounts; cleaner error recovery.
-
-**Usage Example:**
-```powershell
-.\Build-Image-Kimi.ps1 -SourceISO "C:\Win11.iso" -WorkRoot "D:\Build"
-```
-
-### 3. Build-Image-OldWay.ps1
+### 2. Build-Image-OldWay.ps1
 
 Legacy OSDCloud-based build using the OSD PowerShell module.
 - Creates an OSDCloud template (`WinRE`) and workspace.
@@ -140,7 +144,7 @@ Legacy OSDCloud-based build using the OSD PowerShell module.
 .\Build-Image-OldWay.ps1
 ```
 
-### 4. Quick-Launch.ps1
+### 3. Quick-Launch.ps1
 
 Menu-driven launcher for common tasks:
 - Build RAM OS (ISO mode or WinRE mode) — calls `Build-Image.ps1` interactively
@@ -154,7 +158,7 @@ Menu-driven launcher for common tasks:
 .\Quick-Launch.ps1
 ```
 
-### 5. Verify-Environment.ps1
+### 4. Verify-Environment.ps1
 
 Performs pre-flight checks before building:
 - OS version, admin rights, PowerShell version
@@ -178,16 +182,17 @@ Performs pre-flight checks before building:
 ```
 OSD-DEV/
 ├── Build-Image.ps1           (Main RAM OS builder — ISO mode or WinRE mode)
-├── Build-Image-Kimi.ps1      (Alternative: Explorer++ primary shell edition)
 ├── Build-Image-OldWay.ps1    (Legacy OSDCloud-based build)
 ├── Quick-Launch.ps1          (Interactive menu launcher)
 ├── Verify-Environment.ps1    (Pre-flight environment check)
 ├── Apps/                     (Pre-staged app archives — git-ignored except README)
+│   ├── WinXShell*.7z/.zip    (optional — avoids forum download)
+│   ├── SysinternalsSuite*.zip (required — no download URL configured)
 │   └── README.md
 └── README.md
 ```
 
-> Place pre-downloaded archives (e.g. `WinXShell*.7z`) in `Apps\` and the build script will use them automatically instead of downloading. Only `README.md` is tracked by Git — everything else in that folder is ignored.
+> Place pre-downloaded archives in `Apps\` and the build script picks them up automatically. `WinXShell*.7z/.zip` skips the forum download; `SysinternalsSuite*.zip` is **required** (no download URL is configured — the build will abort without it). Only `README.md` is tracked by Git — everything else in that folder is ignored.
 
 **Generated build output** (under `-WorkRoot`, e.g. `D:\Build`):
 
@@ -221,6 +226,7 @@ D:\Build\
 | WinXShell | latest (from `Apps\` or forum URL) | Lightweight WinPE desktop shell |
 | IBM Semeru JDK 8 (OpenJ9) | 8u482-b08 (primary), 8u472-b08 (fallback) | Java runtime (~175 MB, needs ≥ 2 GB RAM target) |
 | 7-Zip | 24.08 (extra portable) | Archiver (build-time extractor + injected into image) |
+| Sysinternals Suite | from `Apps\SysinternalsSuite*.zip` | Microsoft Sysinternals tools — ProcExp, Autoruns, etc. (added to `PATH`) |
 | Explorer++ | 1.4.0 | Portable file manager (optional) |
 | Chrome++ (Chrome Plus) | 1.15.1 patch + Chrome 145 program files | Patched Chromium browser (optional) |
 | Dell WinPE 11 Drivers | OSD catalog (auto-latest), A08 fallback | Hardware drivers for Dell systems (optional) |
@@ -302,5 +308,5 @@ IBM Semeru JDK 8 adds ~175 MB to the compressed WIM on its own. If booting on ma
 
 ---
 
-_Last updated: March 2026_
+_Last updated: March 6, 2026_
 

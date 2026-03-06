@@ -1504,6 +1504,14 @@ function Invoke-ADKEnhancement {
     if (Test-Path $Src) {
       $dir = Split-Path $Dst -Parent
       if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+      if (Test-Path $Dst) {
+        # Files in a mounted WinRE WIM are owned by TrustedInstaller with no write ACE for
+        # Administrators. Set-ItemProperty and Copy-Item -Force both fail without first
+        # taking ownership, granting write access, and clearing the read-only attribute.
+        & takeown.exe /F "$Dst" /A 2>&1 | Out-Null
+        & icacls.exe  "$Dst" /grant "Administrators:F" /Q 2>&1 | Out-Null
+        & attrib.exe  -R -S "$Dst" 2>&1 | Out-Null
+      }
       Copy-Item -Path $Src -Destination $Dst -Force
       return $true
     }
@@ -2094,64 +2102,7 @@ function Create-StartupScript {
     throw "Critical path conversion error. Build cannot continue."
   }
 
-  #TODO:REWORK
-  # ── Startup sequence (optimized) ───────────────────────────────────────────
-  # 1. wpeinit: initializes all devices, network adapters, and storage
-  #    (no need for separate wpeutil InitializeNetwork — wpeinit already does this)
-  # 2. Disable firewall for easier network access
-  # 3. WiFi setup (if enabled)
-  # 4. Environment variables for Java, 7-Zip, etc.
-  # 5. Launch WinXShell (last step, blocking)
-  #
-  # Reference: Build-Image-OldWay-Rework.ps1
-  $content = @'
-@ECHO OFF
-wpeinit
-
-REM Disable firewall for easier network access
-wpeutil DisableFirewall
-'@
-
-  if ($wifiEnabled) {
-    $content += @'
-
-REM === WiFi Initialization (OSD) ===
-PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
-'@
-  }
-
-  # Set environment variables (simpler and more reliable than offline hive editing)
-  if ($Script:Config.Apps.ContainsKey('Java')) {
-    $javaRuntime = 'X:\Program Files\PortableApps\Java'
-    $content += "`r`nSET JAVA_HOME=$javaRuntime`r`nSET PATH=%PATH%;$javaRuntime\bin`r`n"
-  }
-  if ($Script:Config.Apps.ContainsKey('7-Zip')) {
-    $szRuntime = 'X:\Program Files\PortableApps\7-Zip'
-    $content += "SET PATH=%PATH%;$szRuntime`r`n"
-  }
-  if ($Script:Config.Apps.ContainsKey('SysinternalsSuite')) {
-    $sysRuntime = 'X:\Program Files\PortableApps\SysinternalsSuite'
-    $content += "SET PATH=%PATH%;$sysRuntime`r`n"
-  }
-
-  # Launch WinXShell (blocking — when WinXShell exits, WinPE shuts down)
-  if ($wxRuntime) {
-    # FIX #1: Use empty title with variable to avoid START command ambiguity with quoted paths
-    # Pattern: set VAR=path && start /wait "" "%VAR%"
-    $content += @"
-
-REM === Apply Post-Shell Tweaks ===
-if exist "X:\Windows\System32\RAMOS\PostShell.cmd" (
-  start "" "X:\Windows\System32\RAMOS\PostShell.cmd"
-)
-
-REM === Start Shell ===
-set WXSHELL=$wxRuntime
-start /wait "" "%WXSHELL%"
-"@
-    Write-BuildLog "  StartNet.cmd will launch: $wxRuntime" -Level Info
-  } else {
-    # FIX #4: Make shell fallback a hard error (cannot boot without shell)
+  if (-not $wxRuntime) {
     $msg = "CRITICAL: WinXShell was not found in the mounted WIM.`n"
     $msg += "The bootable image cannot function without a shell.`n"
     $msg += "Verify WinXShell download/extraction succeeded and try again."
@@ -2159,13 +2110,40 @@ start /wait "" "%WXSHELL%"
     throw "WinXShell not available - build cannot complete."
   }
 
-  $content += @'
-
-exit /b 0
+  # Base script — OSDCloud handles wpeinit, firewall, WiFi
+  $content = @'
+@ECHO OFF
+wpeinit
+cd\
+title RAMOS Networking Starter
+PowerShell -Nol -C Initialize-OSDCloudStartnet
+PowerShell -Nol -C Initialize-OSDCloudStartnetUpdate
+@ECHO OFF
 '@
 
+  # Optional PATH entries for injected portable apps
+  if ($Script:Config.Apps.ContainsKey('Java')) {
+    $javaRuntime = 'X:\Program Files\PortableApps\Java'
+    $content += "SET JAVA_HOME=$javaRuntime`r`nSET PATH=%PATH%;$javaRuntime\bin`r`n"
+  }
+  if ($Script:Config.Apps.ContainsKey('7-Zip')) {
+    $content += "SET PATH=%PATH%;X:\Program Files\PortableApps\7-Zip`r`n"
+  }
+  if ($Script:Config.Apps.ContainsKey('SysinternalsSuite')) {
+    $content += "SET PATH=%PATH%;X:\Program Files\PortableApps\SysinternalsSuite`r`n"
+  }
+
+  # Apply pre-shell tweaks (wallpaper, accent colour registry), then launch shell
+  $content += @"
+if exist "X:\Windows\System32\RAMOS\PostShell.cmd" call "X:\Windows\System32\RAMOS\PostShell.cmd"
+start /wait "$wxRuntime"
+exit /b 0
+"@
+
+  Write-BuildLog "  StartNet.cmd will launch: $wxRuntime" -Level Info
+
   Set-Content -Path (Join-Path $mount 'Windows\System32\StartNet.cmd') -Value $content -Force -Encoding ASCII
-  Write-BuildLog "StartNet.cmd created$(if ($wifiEnabled) { ' (WiFi: Initialize-OSDCloudStartnet -WirelessConnect)' })" -Level 'Success'
+  Write-BuildLog "StartNet.cmd created$(if ($wifiEnabled) { ' (WiFi: net start WlanSvc + WirelessConnect.exe)' })" -Level 'Success'
 }
 
 function Create-PostShellScript {
