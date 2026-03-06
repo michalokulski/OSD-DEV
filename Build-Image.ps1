@@ -170,7 +170,48 @@ param(
   [int]$WimIndex = 1,
 
   [Parameter(Mandatory = $false)]
-  [switch]$EnableFBWF
+  [switch]$EnableFBWF,
+
+  # ── ADK Enhancement (install.wim component injection) ──────────────────────
+  # Path to a Windows 10/11 ISO containing install.wim.
+  # In ISO mode (-SourceISO), if omitted, install.wim is auto-discovered from the
+  # already-extracted SourceISO (no re-download needed).
+  # In WinRE mode (-UseWinRE), provide this to unlock the full enhancement pass.
+  [Parameter(Mandatory = $false)]
+  [ValidateScript({
+      if ($_) {
+        if (-not (Test-Path "$_")) { throw "EnhanceFromISO not found: $_" }
+        if ([IO.Path]::GetExtension("$_").ToLower() -ne '.iso') { throw "EnhanceFromISO must be an .iso file" }
+      }
+      $true
+    })]
+  [string]$EnhanceFromISO = "",
+
+  # Index inside install.wim to use as component source.
+  # Default 1 is correct for most retail Windows ISOs.
+  [Parameter(Mandatory = $false)]
+  [ValidateRange(1,16)]
+  [int]$InstallWimIndex = 1,
+
+  # Include WoW64 (32-bit compatibility layer) — 150+ DLLs from PhoenixPE minimal list.
+  # Enables 32-bit recovery / forensics tools in a 64-bit WinPE. Adds ~150-300 MB.
+  [Parameter(Mandatory = $false)]
+  [switch]$IncludeWoW64,
+
+  # Inject audio subsystem (audiodg, WASAPI, etc.) from install.wim.
+  [Parameter(Mandatory = $false)]
+  [switch]$IncludeAudio,
+
+  # Inject shell components (Explorer, DWM, shell32, XAML) from install.wim.
+  # Enable for builds that need the full Windows desktop shell.
+  [Parameter(Mandatory = $false)]
+  [switch]$IncludeShell,
+
+  # WinPE scratch space in MB (RAM disk used by DISM/Setup — separate from FBWF).
+  # Valid values: 32, 64, 128, 256, 512.
+  [Parameter(Mandatory = $false)]
+  [ValidateSet(32,64,128,256,512)]
+  [int]$ScratchSpaceMB = 512
 )
 
 #Requires -RunAsAdministrator
@@ -1412,33 +1453,603 @@ function Inject-AllApps {
 }
 
 # ============================================
-# REGISTRY (minimal; no FBWF on by default)
+# ADK ENHANCEMENT  (PhoenixPE / wimbuilder2 approach)
+# Mounts install.wim (read-only) and injects:
+#   Step A — Core runtime components (DLLs, WiFi drivers, iSCSI MOFs, fonts)
+#   Step B — WoW64 (32-bit subsystem) — optional via -IncludeWoW64
+#   Step C — Audio subsystem         — optional via -IncludeAudio
+#   Step D — Shell components         — optional via -IncludeShell
+#   Step E — Registry merge from install.wim hives (CLSID, COM, Svchost, LSA…)
+#   Step F — Drive-letter fix (C:\ → X:\) in PE SOFTWARE hive
+#   Step G — WinPE scratch space via DISM /Set-ScratchSpace
+#   Step H — Slim: MUI cleanup, telemetry, WMI auto-recover, migration engine
 # ============================================
-function Configure-SystemRegistry {
-  # WinPE does not use Winlogon, registry context menus, or any offline-hive setting
-  # that can't be done more reliably via SET in startnet.cmd.
-  # JAVA_HOME / PATH are injected by Create-StartupScript instead.
-  # FBWF overlay size is the only remaining hive write — handled inline below.
-  if (-not $EnableFBWF) {
-    Write-BuildLog "Registry: no hive writes needed (env vars go into startnet.cmd)" -Level Info
+function Invoke-ADKEnhancement {
+  param(
+    [Parameter(Mandatory)][string]$InstallWimPath,
+    [int]$InstallIndex = 1
+  )
+
+  Write-BuildLog "==> ADK Enhancement: injecting components from install.wim..." -Level Info
+  Write-BuildLog "    Source : $InstallWimPath (index $InstallIndex)" -Level Info
+
+  $mount        = $Script:Config.Paths.Mount
+  $mountInstall = Join-Path $Script:Config.Paths.Temp 'mount_install'
+  $lang         = $Script:Config.Locale
+  if (-not $lang) { $lang = 'en-us' }
+
+  # -- Helper: copy a file only if the source exists -----------------------
+  function Copy-IfPresent {
+    param([string]$Src, [string]$Dst)
+    if (Test-Path $Src) {
+      $dir = Split-Path $Dst -Parent
+      if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+      Copy-Item -Path $Src -Destination $Dst -Force
+      return $true
+    }
+    return $false
+  }
+
+  # -- Helper: remove a path safely ----------------------------------------
+  function Remove-Safe {
+    param([string]$Path)
+    if (Test-Path $Path) { Remove-Item $Path -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+
+  New-Item -ItemType Directory -Force -Path $mountInstall | Out-Null
+
+  # Mount install.wim read-only
+  Write-BuildLog "    Mounting install.wim (read-only)..." -Level Info
+  & $Script:Config.Tools.DISM /Mount-Wim /WimFile:"$InstallWimPath" /Index:$InstallIndex `
+    /MountDir:"$mountInstall" /ReadOnly 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-BuildLog "    install.wim mount failed (exit $LASTEXITCODE) — enhancement skipped" -Level Warning
     return
   }
 
-  Write-BuildLog "Configuring Registry (FBWF overlay size)…"
-  $mount   = $Script:Config.Paths.Mount
-  $sysPath = Join-Path $mount "Windows\System32\config\SYSTEM"
-
-  # Force-unload any stale hive from a prior crashed build, then load fresh.
-  reg unload "HKLM\RAM_SYS" 2>&1 | Out-Null
-  $out = reg load "HKLM\RAM_SYS" $sysPath 2>&1
-  if ($LASTEXITCODE -ne 0) { throw "reg load HKLM\RAM_SYS failed (exit $LASTEXITCODE): $out" }
+  $iSys32  = Join-Path $mountInstall 'Windows\System32'
+  $iSysWOW = Join-Path $mountInstall 'Windows\SysWOW64'
+  $iWin    = Join-Path $mountInstall 'Windows'
+  $peSys32 = Join-Path $mount        'Windows\System32'
+  $peSysWO = Join-Path $mount        'Windows\SysWOW64'
+  $peWin   = Join-Path $mount        'Windows'
 
   try {
-    $out = reg add "HKLM\RAM_SYS\ControlSet001\Services\FBWF\Parameters" /v WinPECacheThreshold /t REG_DWORD /d $RamdiskSizeMB /f 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-BuildLog "  FBWF Cache Threshold reg add failed: $out" -Level Warning }
-    else { Write-BuildLog "FBWF WinPECacheThreshold set to $RamdiskSizeMB MB" -Level Success }
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step A — Core runtime components
+    # Based on PhoenixPE 210-Core.script and wimbuilder2 System/main.bat
+    # ════════════════════════════════════════════════════════════════════
+    Write-BuildLog "  [A] Core runtime components from install.wim..." -Level Info
+
+    $essentialDlls = @(
+      'powercfg.cpl','powercpl.dll','umpoext.dll',
+      'Windows.CloudStore.dll',
+      'ncsi.dll',
+      'credssp.dll',
+      'ISM.exe',
+      'dxgi.dll','dxva2.dll','DXCore.dll',
+      'd3d11.dll','d3d12.dll',
+      'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll',
+      'fmapi.dll'
+    )
+    $copiedA = 0
+    foreach ($f in $essentialDlls) {
+      if (Copy-IfPresent (Join-Path $iSys32 $f) (Join-Path $peSys32 $f)) { $copiedA++ }
+    }
+    # Language-specific ncsi.dll.mui
+    Copy-IfPresent (Join-Path $iSys32 "$lang\ncsi.dll.mui") `
+                   (Join-Path $peSys32 "$lang\ncsi.dll.mui") | Out-Null
+
+    # WiFi drivers (PhoenixPE 210-Core.script)
+    $peDrivers = Join-Path $mount 'Windows\System32\Drivers'
+    foreach ($drv in @('vwifibus.sys','vwifimp.sys','WifiCx.sys')) {
+      if (Copy-IfPresent (Join-Path $iWin "System32\Drivers\$drv") (Join-Path $peDrivers $drv)) {
+        Write-BuildLog "    WiFi driver: $drv" -Level Info
+      }
+    }
+
+    # iSCSI WMI MOF files (PhoenixPE 210-Core.script)
+    $peWbem      = Join-Path $mount 'Windows\System32\wbem'
+    $installWbem = Join-Path $mountInstall 'Windows\System32\wbem'
+    if (-not (Test-Path $peWbem)) { New-Item -ItemType Directory -Path $peWbem -Force | Out-Null }
+    foreach ($mof in @('iscsidsc.mof','iscsihba.mof','iscsiprf.mof','iscsirem.mof',
+                        'iscsiwmiv2.mof','iscsiwmiv2_uninstall.mof','msiscsi.mof',
+                        'storagewmi.mof','storagewmi_passthru.mof')) {
+      Copy-IfPresent (Join-Path $installWbem $mof) (Join-Path $peWbem $mof) | Out-Null
+    }
+
+    # Fonts (Segoe UI family, Consolas, Segoe Fluent Icons)
+    $fontsDir = Join-Path $peWin 'Fonts'
+    if (-not (Test-Path $fontsDir)) { New-Item -ItemType Directory -Path $fontsDir -Force | Out-Null }
+    $fontList = @('segoeui.ttf','segoeuib.ttf','segoeuii.ttf','segoeuiz.ttf',
+                  'seguisb.ttf','seguisym.ttf','consola.ttf','consolab.ttf',
+                  'consolai.ttf','consolaz.ttf','SegoeIcons.ttf')
+    foreach ($font in $fontList) {
+      Copy-IfPresent (Join-Path $iWin "Fonts\$font") (Join-Path $fontsDir $font) | Out-Null
+    }
+    Write-BuildLog "    Core inject: $copiedA DLLs + WiFi drivers + iSCSI MOFs + fonts" -Level Info
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step B — WoW64 (PhoenixPE 251-WoW64.script minimal list)
+    # ════════════════════════════════════════════════════════════════════
+    if ($IncludeWoW64) {
+      Write-BuildLog "  [B] WoW64 (32-bit subsystem)..." -Level Info
+      if (-not (Test-Path $peSysWO)) { New-Item -ItemType Directory -Path $peSysWO -Force | Out-Null }
+
+      # WoW64 bridge DLLs in System32
+      foreach ($dll in @('wow64.dll','wow64base.dll','wow64con.dll','wow64cpu.dll','wow64win.dll','wowreg32.exe')) {
+        Copy-IfPresent (Join-Path $iSys32 $dll) (Join-Path $peSys32 $dll) | Out-Null
+      }
+
+      # SysWOW64 minimal list (~150+ files — PhoenixPE 251-WoW64.script)
+      $sysWow64Files = @(
+        # Core runtime
+        'ntdll.dll','kernel32.dll','kernelbase.dll','kernel.appcore.dll',
+        'advapi32.dll','user32.dll','win32u.dll','gdi32.dll','gdi32full.dll',
+        'msvcrt.dll','msvcrt40.dll','ucrtbase.dll','msvcp_win.dll','msvcp110_win.dll',
+        'msvcp60.dll','msvbvm60.dll','crtdll.dll','rpcrt4.dll','sechost.dll',
+        'combase.dll','ole32.dll','oleaut32.dll','olecli32.dll','oledlg.dll',
+        'olepro32.dll','asycfilt.dll','stdole2.tlb','stdole32.tlb',
+        # Shell and UI
+        'shlwapi.dll','shell32.dll','SHCore.dll','shfolder.dll','shdocvw.dll',
+        'shellstyle.dll','comdlg32.dll','comctl32.dll','ExplorerFrame.dll',
+        'ieframe.dll','iertutil.dll','mshtml.dll','imgutil.dll',
+        'thumbcache.dll','linkinfo.dll','ntshrui.dll',
+        # DirectX / Graphics
+        'dxgi.dll','d3d9.dll','d3d10warp.dll','d3d11.dll','d3d12.dll',
+        'd2d1.dll','Dwrite.dll','dcomp.dll','ddraw.dll',
+        'dwmapi.dll','UIAnimation.dll','uxtheme.dll',
+        'GdiPlus.dll','WindowsCodecs.dll','mscms.dll',
+        # Security / Crypto
+        'crypt32.dll','cryptbase.dll','cryptdll.dll','cryptnet.dll','cryptsp.dll',
+        'ncrypt.dll','ncryptprov.dll','ncryptsslp.dll','bcrypt.dll','bcryptprimitives.dll',
+        'wintrust.dll','rsaenh.dll','schannel.dll','sspicli.dll','secur32.dll',
+        'kerberos.dll','msv1_0.dll','dpapi.dll','samlib.dll','samcli.dll',
+        'mskeyprotect.dll','slc.dll',
+        # Network
+        'ws2_32.dll','wsock32.dll','mswsock.dll','winhttp.dll','wininet.dll',
+        'urlmon.dll','webio.dll','dnsapi.dll','dhcpcsvc.dll','dhcpcsvc6.dll',
+        'iphlpapi.dll','winnsi.dll','rasapi32.dll','rasadhlp.dll',
+        'fwpuclnt.dll','FirewallAPI.dll','fwbase.dll','fwpolicyiomgr.dll',
+        'ntlanman.dll','netapi32.dll','netutils.dll','srvcli.dll','wkscli.dll',
+        'logoncli.dll','dfscli.dll',
+        # COM / Automation
+        'actxprxy.dll','atl.dll','atlthunk.dll','clb.dll','clbcatq.dll',
+        'sxs.dll','sxsstore.dll','sxstrace.exe',
+        'OneCoreCommonProxyStub.dll','OneCoreUAPCommonProxyStub.dll',
+        'OnDemandConnRouteHelper.dll',
+        'Windows.Globalization.dll','Windows.Graphics.dll',
+        'Windows.FileExplorer.Common.dll','windows.storage.dll',
+        'twinapi.dll','twinapi.appcore.dll','WinTypes.dll',
+        'policymanager.dll','edputil.dll','wldp.dll',
+        # System utilities (32-bit)
+        'reg.exe','regsvr32.exe','regedt32.exe','rundll32.exe','svchost.exe',
+        'cmd.exe','cmdext.dll','attrib.exe','clip.exe','findstr.exe',
+        'run64.exe','dllhost.exe',
+        'net.exe','net1.exe','netmsg.dll',
+        # Settings / Policy
+        'setupapi.dll','cfgmgr32.dll','devobj.dll','devrtl.dll',
+        'authz.dll','ntmarta.dll','ntasn1.dll','msasn1.dll',
+        'gpapi.dll','userenv.dll','profapi.dll',
+        'regapi.dll','resutils.dll',
+        # IME / Locale
+        'imm32.dll','msctf.dll','InputHost.dll','usp10.dll','lpk.dll',
+        'mlang.dll','normaliz.dll','tzres.dll','winnlsres.dll','winbrand.dll',
+        'Bcp47Langs.dll','bcp47mrm.dll',
+        # Misc runtime
+        'hid.dll','avifil32.dll','avrt.dll','msvfw32.dll','winmm.dll',
+        'winmmbase.dll','msacm32.dll','msacm32.drv','mpr.dll',
+        'version.dll','psapi.dll','msimg32.dll','lz32.dll',
+        'pdh.dll','fltlib.dll','ulib.dll',
+        'vbscript.dll','mfc40.dll','mfc42.dll',
+        'dbghelp.dll','dbgcore.dll','msxml3.dll','msxml3r.dll',
+        'msxml6.dll','msxml6r.dll',
+        'xmllite.dll','dui70.dll','duser.dll',
+        'UIAutomationCore.dll','SensApi.dll','StructuredQuery.dll',
+        'riched20.dll','riched32.dll','msdelta.dll',
+        'ColorAdapterClient.dll','DataExchange.dll','CoreUIComponents.dll',
+        'aclui.dll','mscories.dll',
+        'odbc32.dll','odbcint.dll',
+        'wimgapi.dll','davhlpr.dll',
+        'cscapi.dll','directmanipulation.dll',
+        'rmclient.dll',
+        'framedynos.dll','ncobjapi.dll','wmiclnt.dll',
+        'adsldp.dll','adsldpc.dll','activeds.dll','ntdsapi.dll',
+        'wldap32.dll','dsrole.dll',
+        'spfileq.dll','SPInf.dll','dsound.dll','wow32.dll','winsta.dll',
+        'wtsapi32.dll','wbemcomn.dll'
+      )
+      # NLS/KBD glob copies
+      Get-ChildItem -Path $iSysWOW -Filter 'C_*.NLS'  -ErrorAction SilentlyContinue |
+        ForEach-Object { Copy-IfPresent $_.FullName (Join-Path $peSysWO $_.Name) | Out-Null }
+      Get-ChildItem -Path $iSysWOW -Filter 'KBD*.dll' -ErrorAction SilentlyContinue |
+        ForEach-Object { Copy-IfPresent $_.FullName (Join-Path $peSysWO $_.Name) | Out-Null }
+
+      $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $wowCopied = 0; $wowSkipped = 0
+      foreach ($file in $sysWow64Files) {
+        if (-not $seen.Add($file)) { continue }
+        if (Copy-IfPresent (Join-Path $iSysWOW $file) (Join-Path $peSysWO $file)) { $wowCopied++ }
+        else { $wowSkipped++ }
+      }
+      # SysWOW64\wbem (WMI 32-bit support)
+      $wbemWow = Join-Path $iSysWOW 'wbem'
+      $peWbemWow = Join-Path $peSysWO 'wbem'
+      if (Test-Path $wbemWow) {
+        if (-not (Test-Path $peWbemWow)) { New-Item -ItemType Directory -Path $peWbemWow -Force | Out-Null }
+        Get-ChildItem -Path $wbemWow -File -ErrorAction SilentlyContinue |
+          ForEach-Object { Copy-IfPresent $_.FullName (Join-Path $peWbemWow $_.Name) | Out-Null }
+      }
+      # SysWOW64 audio for 32-bit app compat (PhoenixPE 251-WoW64.script)
+      foreach ($f in @('AudioSes.dll','MMDevAPI.dll','devenum.dll','quartz.dll','msdmo.dll','dsound.dll')) {
+        Copy-IfPresent (Join-Path $iSysWOW $f) (Join-Path $peSysWO $f) | Out-Null
+      }
+      Write-BuildLog "    WoW64: $wowCopied copied, $wowSkipped not in source" -Level Info
+    }
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step C — Audio subsystem (wimbuilder2 / PhoenixPE Components/Audio)
+    # ════════════════════════════════════════════════════════════════════
+    if ($IncludeAudio) {
+      Write-BuildLog "  [C] Audio subsystem..." -Level Info
+      foreach ($dll in @('audiodg.exe','audiosrv.dll','audioeng.dll','audioendpointbuilder.dll',
+                          'mmdevapi.dll','wasapi.dll','mf.dll','mfplat.dll','mfreadwrite.dll',
+                          'ksuser.dll','ksproxy.ax','dsound.dll','XAudio2_9.dll',
+                          'wmasf.dll','wmaudio3.dll')) {
+        Copy-IfPresent (Join-Path $iSys32 $dll) (Join-Path $peSys32 $dll) | Out-Null
+      }
+      Write-BuildLog "    Audio subsystem injected" -Level Info
+    }
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step D — Shell components (wimbuilder2 / PhoenixPE Components/Shell)
+    # ════════════════════════════════════════════════════════════════════
+    if ($IncludeShell) {
+      Write-BuildLog "  [D] Shell components (Explorer, DWM, XAML)..." -Level Info
+      foreach ($dll in @('explorer.exe','shell32.dll','shlwapi.dll','shsvcs.dll',
+                          'SHCore.dll','Windows.Shell.ServiceProvider.dll',
+                          'dwm.exe','dwmapi.dll','dwminit.dll','udwm.dll',
+                          'taskbar.dll','twinui.dll','twinui.appcore.dll','twinui.pcshell.dll',
+                          'windows.ui.dll','windows.ui.xaml.dll',
+                          'uiautomationcore.dll','uiautomation6.dll',
+                          'ExplorerFrame.dll','cscui.dll')) {
+        Copy-IfPresent (Join-Path $iSys32 $dll) (Join-Path $peSys32 $dll) | Out-Null
+      }
+      Write-BuildLog "    Shell components injected" -Level Info
+    }
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step E — Registry merge from install.wim hives
+    # Matches PhoenixPE 211-Registry.script Config-BaseWim-SoftwareHive +
+    # Config-BaseWim-SystemHive (subtree copies via reg.exe copy /s)
+    # ════════════════════════════════════════════════════════════════════
+    Write-BuildLog "  [E] Registry merge from install.wim hives..." -Level Info
+
+    $peHiveSW  = Join-Path $mount 'Windows\System32\config\SOFTWARE'
+    $peHiveSYS = Join-Path $mount 'Windows\System32\config\SYSTEM'
+    $iHiveSW   = Join-Path $mountInstall 'Windows\System32\config\SOFTWARE'
+    $iHiveSYS  = Join-Path $mountInstall 'Windows\System32\config\SYSTEM'
+
+    # copy hives to a neutral location so reg.exe can load them alongside the PE hives
+    $hiveTmp   = Join-Path $Script:Config.Paths.Temp 'hive_tmp'
+    New-Item -ItemType Directory -Force -Path $hiveTmp | Out-Null
+    $iSwCopy  = Join-Path $hiveTmp 'inst_SW'
+    $iSysCopy = Join-Path $hiveTmp 'inst_SYS'
+    Copy-Item $iHiveSW  $iSwCopy  -Force -ErrorAction SilentlyContinue
+    Copy-Item $iHiveSYS $iSysCopy -Force -ErrorAction SilentlyContinue
+
+    $tmpPeSW   = 'HKLM\ADK_PE_SW'
+    $tmpPeSYS  = 'HKLM\ADK_PE_SYS'
+    $tmpInSW   = 'HKLM\ADK_IN_SW'
+    $tmpInSYS  = 'HKLM\ADK_IN_SYS'
+
+    foreach ($key in @($tmpPeSW,$tmpPeSYS,$tmpInSW,$tmpInSYS)) {
+      reg unload $key 2>&1 | Out-Null
+    }
+
+    reg load $tmpPeSW  $peHiveSW   2>&1 | Out-Null
+    reg load $tmpPeSYS $peHiveSYS  2>&1 | Out-Null
+    reg load $tmpInSW  $iSwCopy    2>&1 | Out-Null; $inSwLoaded  = ($LASTEXITCODE -eq 0)
+    reg load $tmpInSYS $iSysCopy   2>&1 | Out-Null; $inSysLoaded = ($LASTEXITCODE -eq 0)
+
+    try {
+      if ($inSwLoaded) {
+        # COM / Shell classes
+        foreach ($k in @('Classes\AppID','Classes\CLSID','Classes\Interface','Classes\Typelib',
+                          'Classes\folder','Classes\themefile','Classes\SystemFileAssociations',
+                          'Classes\DirectShow','Classes\Media Type','Classes\MediaFoundation')) {
+          reg copy "HKLM\ADK_IN_SW\$k" "HKLM\ADK_PE_SW\$k" /s /f 2>&1 | Out-Null
+        }
+        # Svchost, SecurityManager, Ole, PolicyManager
+        foreach ($k in @('Microsoft\Windows NT\CurrentVersion\Svchost',
+                          'Microsoft\SecurityManager','Microsoft\Ole',
+                          'Microsoft\PolicyManager')) {
+          reg copy "HKLM\ADK_IN_SW\$k" "HKLM\ADK_PE_SW\$k" /s /f 2>&1 | Out-Null
+        }
+        # WinRT / AppModel / AppX
+        foreach ($k in @('Microsoft\WindowsRuntime',
+          'Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel',
+          'Microsoft\Windows\CurrentVersion\AppModel',
+          'Microsoft\Windows\CurrentVersion\AppX')) {
+          reg copy "HKLM\ADK_IN_SW\$k" "HKLM\ADK_PE_SW\$k" /s /f 2>&1 | Out-Null
+        }
+        Write-BuildLog "    SOFTWARE hive: COM, shell classes, Svchost, AppModel merged" -Level Info
+      }
+      if ($inSysLoaded) {
+        # Appinfo, LSA, Power, TCP/IP services, KnownDLLs
+        foreach ($k in @('ControlSet001\Services\Appinfo',
+                          'ControlSet001\Control\Lsa',
+                          'ControlSet001\Control\Power',
+                          'ControlSet001\Services\Tcpip',
+                          'ControlSet001\Services\Winsock',
+                          'ControlSet001\Services\Winsock2',
+                          'ControlSet001\Control\Session Manager\KnownDLLs')) {
+          reg copy "HKLM\ADK_IN_SYS\$k" "HKLM\ADK_PE_SYS\$k" /s /f 2>&1 | Out-Null
+        }
+        # TermService — copy and disable (Start=4)
+        reg copy "HKLM\ADK_IN_SYS\ControlSet001\Services\TermService" `
+                 "HKLM\ADK_PE_SYS\ControlSet001\Services\TermService" /s /f 2>&1 | Out-Null
+        reg add  "HKLM\ADK_PE_SYS\ControlSet001\Services\TermService" `
+          /v Start /t REG_DWORD /d 4 /f 2>&1 | Out-Null
+        Write-BuildLog "    SYSTEM hive: Appinfo, LSA, Power, TCP/IP, KnownDLLs, TermService merged" -Level Info
+      }
+
+      # ════════════════════════════════════════════════════════════════
+      # Step F — Drive-letter fix: ensure PE SOFTWARE uses X:\ not C:\
+      # PhoenixPE SetSystemDriveLetter
+      # ════════════════════════════════════════════════════════════════
+      Write-BuildLog "  [F] Verifying PE drive letter in SOFTWARE hive..." -Level Info
+      $clsidCheck = reg query 'HKLM\ADK_PE_SW\Classes\CLSID\{0000002F-0000-0000-C000-000000000046}\InprocServer32' 2>&1 | Out-String
+      if ($clsidCheck -match 'C:\\') {
+        Write-BuildLog "    Detected C:\\ in PE hive — replacing with X:\\ ..." -Level Warning
+        $exportPath = Join-Path $Script:Config.Paths.Temp 'pe_sw_drivfix.reg'
+        reg export 'HKLM\ADK_PE_SW' $exportPath /y 2>&1 | Out-Null
+        if (Test-Path $exportPath) {
+          $content = [System.IO.File]::ReadAllText($exportPath)
+          $content = $content -replace '(?i)(")C:\\\\', '$1X:\\'
+          [System.IO.File]::WriteAllText($exportPath, $content)
+          reg import $exportPath 2>&1 | Out-Null
+          Remove-Item $exportPath -Force -ErrorAction SilentlyContinue
+          Write-BuildLog "    Drive letter corrected to X:\\" -Level Info
+        }
+      } else {
+        Write-BuildLog "    Drive letter: X:\\ confirmed" -Level Info
+      }
+    } finally {
+      foreach ($key in @($tmpPeSW,$tmpPeSYS,$tmpInSW,$tmpInSYS)) {
+        reg unload $key 2>&1 | Out-Null
+      }
+      # Clean up registry transaction logs left by reg.exe
+      $cfgDir = Join-Path $mount 'Windows\System32\config'
+      Get-ChildItem -Path $cfgDir -Include '*.LOG1','*.LOG2','*.blf','*.regtrans-ms' `
+        -Recurse -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step G — WinPE scratch space (DISM /Set-ScratchSpace)
+    # PhoenixPE references this as a pre-flight step; wimbuilder2 uses FBWF sizing.
+    # ════════════════════════════════════════════════════════════════════
+    Write-BuildLog "  [G] Setting WinPE scratch space: $ScratchSpaceMB MB..." -Level Info
+    $scratchArg = "/Set-ScratchSpace:$ScratchSpaceMB"
+    & $Script:Config.Tools.DISM "/Image:$mount" $scratchArg 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-BuildLog "    DISM /Set-ScratchSpace returned $LASTEXITCODE (non-fatal)" -Level Warning
+    } else {
+      Write-BuildLog "    Scratch space set to $ScratchSpaceMB MB" -Level Info
+    }
+
+    # ════════════════════════════════════════════════════════════════════
+    # Step H — Slim: remove unneeded files
+    # Based on PhoenixPE SlimFast and wimbuilder2 SlimWim
+    # ════════════════════════════════════════════════════════════════════
+    Write-BuildLog "  [H] Slimming PE image (MUI, telemetry, WMI autoRecover, migration)..." -Level Info
+
+    # H1: MUI language resources — keep $lang and en-us (boot fallback)
+    foreach ($muiRoot in @(
+      (Join-Path $mount 'Windows\System32'),
+      (Join-Path $mount 'Windows\Boot\EFI'),
+      (Join-Path $mount 'Windows\Boot\PCAT'),
+      (Join-Path $mount 'Windows\Boot\PXE')
+    )) {
+      if (-not (Test-Path $muiRoot)) { continue }
+      Get-ChildItem -Path $muiRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^[a-z]{2}-[A-Z]{2}' -and $_.Name -ne $lang -and $_.Name -ne 'en-US' } |
+        ForEach-Object { Remove-Safe $_.FullName }
+    }
+
+    # H2: Telemetry
+    foreach ($item in @(
+      (Join-Path $mount 'Windows\DiagTrack'),
+      (Join-Path $mount 'Windows\System32\DiagSvcs'),
+      (Join-Path $mount 'Windows\System32\diagER.dll'),
+      (Join-Path $mount 'Windows\System32\diagtrack.dll')
+    )) { Remove-Safe $item }
+
+    # H3: WMI auto-recover + logs (WMI rebuilds from MOF files on first boot)
+    foreach ($item in @(
+      (Join-Path $mount 'Windows\System32\wbem\AutoRecover'),
+      (Join-Path $mount 'Windows\System32\wbem\Logs'),
+      (Join-Path $mount 'Windows\System32\wbem\Repository'),
+      (Join-Path $mount 'Windows\System32\wbem\tmf')
+    )) { Remove-Safe $item }
+
+    # H4: Migration engine (not needed in a rescue/RAM OS PE)
+    foreach ($f in @('migapp.xml','migcore.dll','migisol.dll','migres.dll',
+                      'migstore.dll','migsys.dll','SFCN.dat')) {
+      Remove-Safe (Join-Path $mount "Windows\System32\$f")
+    }
+    Remove-Safe (Join-Path $mount 'Windows\System32\migration')
+
+    # H5: WinRE sources folder (present in WinRE base; not needed in output WIM)
+    Remove-Safe (Join-Path $mount 'sources')
+
+    # H6: Desktop.ini stubs
+    Remove-Safe (Join-Path $mount 'Users\Default\Desktop\Desktop.ini')
+    Remove-Safe (Join-Path $mount 'Users\Public\Desktop\Desktop.ini')
+
+    # H7: WallpaperHost / immersive shell provider (cause issues in WinPE)
+    foreach ($f in @('WallpaperHost.exe','windows.immersiveshell.serviceprovider.dll')) {
+      Remove-Safe (Join-Path $mount "Windows\System32\$f")
+    }
+
+    Write-BuildLog "    Slimming complete" -Level Info
+
   } finally {
-    reg unload "HKLM\RAM_SYS" 2>&1 | Out-Null
+    # Unmount install.wim (discard — we only read from it)
+    Write-BuildLog "  Unmounting install.wim..." -Level Info
+    & $Script:Config.Tools.DISM /Unmount-Wim /MountDir:"$mountInstall" /Discard 2>&1 | Out-Null
+    & $Script:Config.Tools.DISM /Cleanup-Mountpoints 2>&1 | Out-Null
+    Remove-Safe $mountInstall
+  }
+
+  Write-BuildLog "ADK Enhancement complete" -Level Success
+}
+
+
+# install.wim hive merging is handled separately in Invoke-ADKEnhancement.
+# ============================================
+function Configure-SystemRegistry {
+  Write-BuildLog "Configuring PE registry (PhoenixPE-aligned tweaks)..."
+  $mount      = $Script:Config.Paths.Mount
+  $swPath     = Join-Path $mount "Windows\System32\config\SOFTWARE"
+  $sysPath    = Join-Path $mount "Windows\System32\config\SYSTEM"
+
+  # Force-unload any stale hives from a prior crashed build, then load fresh.
+  reg unload "HKLM\PE_SW"  2>&1 | Out-Null
+  reg unload "HKLM\PE_SYS" 2>&1 | Out-Null
+
+  $out = reg load "HKLM\PE_SW"  $swPath  2>&1; if ($LASTEXITCODE -ne 0) { throw "reg load PE_SW failed: $out"  }
+  $out = reg load "HKLM\PE_SYS" $sysPath 2>&1; if ($LASTEXITCODE -ne 0) { throw "reg load PE_SYS failed: $out" }
+
+  try {
+    # ── WinPE identification + wallpaper path ─────────────────────────────
+    reg add "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\WinPE" `
+      /v InstRoot /d 'X:\' /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\WinPE" `
+      /v CustomBackground /t REG_EXPAND_SZ `
+      /d 'X:\Windows\Web\Wallpaper\Windows\img0.jpg' /f 2>&1 | Out-Null
+
+    # WinPE OC registration hooks (PhoenixPE Config-SoftwareHive)
+    $ocBase = "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\WinPE\OC"
+    reg add "$ocBase\Microsoft-WinPE-WMI" `
+      /v "1. Register CIMWIN32" /d '%systemroot%\system32\wbem\cimwin32.dll' /f 2>&1 | Out-Null
+    reg add "$ocBase\Microsoft-WinPE-WSH" `
+      /v "1. Register WSHOM" /d '%systemroot%\system32\wshom.ocx' /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\WinPE\UGC" `
+      /v "Microsoft-Windows-TCPIP" /t REG_MULTI_SZ /d "netiougc.exe -online" /f 2>&1 | Out-Null
+
+    # Enable SIHost integration (PhoenixPE)
+    reg add "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\Winlogon" `
+      /v EnableSIHostIntegration /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+
+    # Add DriverStore to Installation Sources (X:\ is the WinPE system drive at runtime)
+    reg add "HKLM\PE_SW\Microsoft\Windows\CurrentVersion\Setup" `
+      /v "Installation Sources" /t REG_MULTI_SZ `
+      /d "X:\Windows\System32\DriverStore\FileRepository" /f 2>&1 | Out-Null
+
+    # Telemetry / DiagTrack (PhoenixPE Config-SystemHive)
+    reg add "HKLM\PE_SW\Microsoft\Windows\CurrentVersion\Policies\DataCollection" `
+      /v AllowTelemetry /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\WMI\Autologger\AutoLogger-Diagtrack-Listener" `
+      /v Start /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Services\diagnosticshub.standardcollector.service" `
+      /v Start /t REG_DWORD /d 4 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Services\DiagTrack" `
+      /v Start /t REG_DWORD /d 4 /f 2>&1 | Out-Null
+
+    # Disable Hibernate + Fast Startup (PhoenixPE)
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Power" `
+      /v HibernateEnabled /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Power" `
+      /v CustomizeDuringSetup /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Session Manager\Power" `
+      /v HiberbootEnabled /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+
+    # Filesystem performance
+    reg add "HKLM\PE_SYS\ControlSet001\Control\FileSystem" `
+      /v NtfsDisableLastAccessUpdate /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\FileSystem" `
+      /v RefsDisableLastAccessUpdate /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\MiniNT" `
+      /v AllowRefsFormatOverNonmirrorVolume /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+
+    # LSA / Security (PhoenixPE — NTLMv2 only, level 3)
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Lsa" `
+      /v "Security Packages" /t REG_MULTI_SZ /d "tspkg" /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\SecurityProviders" `
+      /v SecurityProviders /d "credssp.dll" /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Lsa" `
+      /v LmCompatibilityLevel /t REG_DWORD /d 3 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Lsa" `
+      /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+
+    # AppData environment variable
+    reg add "HKLM\PE_SYS\ControlSet001\Control\Session Manager\Environment" `
+      /v AppData /t REG_EXPAND_SZ `
+      /d '%SystemDrive%\Users\Default\AppData\Roaming' /f 2>&1 | Out-Null
+
+    # AllowStart service keys (ProfSvc, LanmanWorkstation, DNSCache, NlaSvc)
+    foreach ($svc in @('ProfSvc','LanmanWorkstation','DNSCache','NlaSvc')) {
+      reg add "HKLM\PE_SYS\Setup\AllowStart\$svc" /f 2>&1 | Out-Null
+    }
+
+    # USB hub safe-remove
+    reg add "HKLM\PE_SYS\ControlSet001\Services\usbhub\HubG" `
+      /v DisableOnSoftRemove /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+
+    # PS/2 mouse wheel detection
+    reg add "HKLM\PE_SYS\ControlSet001\Services\i8042prt\Parameters" `
+      /v EnableWheelDetection /t REG_DWORD /d 2 /f 2>&1 | Out-Null
+
+    # BFE (Base Filtering Engine) — PhoenixPE Config-SystemHive
+    reg add "HKLM\PE_SYS\ControlSet001\Services\BFE" `
+      /v ImagePath /t REG_EXPAND_SZ `
+      /d "%systemroot%\system32\svchost.exe -k LocalServiceNoNetworkFirewall -p" /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SYS\ControlSet001\Services\BFE" `
+      /v SvcHostSplitDisable /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+
+    # Default user profile path
+    reg add "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-18" `
+      /v ProfileImagePath /d 'X:\Users\Default' /f 2>&1 | Out-Null
+
+    # Desktop personalization
+    reg add "HKLM\PE_SW\Microsoft\Windows\CurrentVersion\Personalization" `
+      /v AllowChangeDesktopBackground /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+    reg add "HKLM\PE_SW\Microsoft\Windows\CurrentVersion\Personalization" `
+      /v AllowPersonalization /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+
+    # Font registration
+    $fontsKey = "HKLM\PE_SW\Microsoft\Windows NT\CurrentVersion\Fonts"
+    reg add $fontsKey /v "Segoe UI (TrueType)" /d segoeui.ttf /f 2>&1 | Out-Null
+    reg add $fontsKey /v "Consolas (TrueType)" /d consola.ttf  /f 2>&1 | Out-Null
+    $pefontsDir = Join-Path $mount "Windows\Fonts"
+    if (Test-Path (Join-Path $pefontsDir 'SegoeIcons.ttf')) {
+      reg add $fontsKey /v "Segoe Fluent Icons (TrueType)" /d SegoeIcons.ttf /f 2>&1 | Out-Null
+    }
+
+    # ── FBWF overlay size (only when -EnableFBWF is specified) ────────────
+    if ($EnableFBWF) {
+      $fbwfKey = "HKLM\PE_SYS\ControlSet001\Services\FBWF"
+      reg add $fbwfKey /v WinPECacheThreshold /t REG_DWORD /d $RamdiskSizeMB /f 2>&1 | Out-Null
+      if ($RamdiskSizeMB -ge 4094) {
+        reg add "HKLM\PE_SYS\ControlSet001\Services\exfat" /v Start /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+        Write-BuildLog "  exFAT driver enabled (required for FBWF >= 4094 MB)" -Level Info
+      }
+      Write-BuildLog "  FBWF WinPECacheThreshold = $RamdiskSizeMB MB" -Level Info
+    }
+
+    Write-BuildLog "PE registry tweaks applied (PhoenixPE-aligned)" -Level Success
+
+  } finally {
+    reg unload "HKLM\PE_SW"  2>&1 | Out-Null
+    reg unload "HKLM\PE_SYS" 2>&1 | Out-Null
+    # Clean up registry transaction logs
+    $cfgDir = Join-Path $mount 'Windows\System32\config'
+    Get-ChildItem -Path $cfgDir -Include '*.LOG1','*.LOG2','*.blf','*.regtrans-ms' `
+      -Recurse -ErrorAction SilentlyContinue |
+      Remove-Item -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -1485,7 +2096,7 @@ wpeutil DisableFirewall
     $content += @'
 
 REM === WiFi Initialization (OSD) ===
-PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnetUpdate } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
+PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
 '@
   }
 
@@ -1586,7 +2197,7 @@ set "PROFILE=X:\ChromeProfile"
 set "CACHE=X:\ChromeCache"
 if not exist "%PROFILE%" mkdir "%PROFILE%"
 if not exist "%CACHE%" mkdir "%CACHE%"
-start "" "{CHROME}" --user-data-dir="%PROFILE%" --disk-cache-dir="%CACHE%" --no-first-run --no-default-browser-check
+start "" "{CHROME}" --user-data-dir="%PROFILE%" --disk-cache-dir="%CACHE%" --no-first-run --no-default-browser-check --no-sandbox --disable-gpu
 exit /b 0
 '@.Replace('{CHROME}',$chromeExeRuntime)
 
@@ -1633,8 +2244,9 @@ function Create-DesktopShortcuts {
     $buildAppsRoot = $Script:Config.Paths.Apps
     $runtimeAppsRoot = "X:\Program Files\PortableApps"
     $chromeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
-    # Use cmd.exe as the shortcut target; WinXShell (and all PE shells) can always launch cmd.exe.
-    &$createMultiLnk "Google Chrome" "cmd.exe" $chromeRuntime "/c `"X:\Windows\System32\RAMOS\StartChrome.cmd`""
+    # Use the full X:\ path to cmd.exe so the .lnk stores the correct WinPE path
+    # (WshShell would otherwise resolve bare "cmd.exe" to C:\Windows\System32\cmd.exe on the build machine).
+    &$createMultiLnk "Google Chrome" "X:\Windows\System32\cmd.exe" $chromeRuntime "/c `"X:\Windows\System32\RAMOS\StartChrome.cmd`""
   }
 
 }
@@ -1743,8 +2355,17 @@ function Build-FinalISO {
     Write-BuildLog "  efisys_noprompt.bin already present in ISO source" -Level Info
   }
 
-  # ── 4. Scrub any non-media files from sources\ before packing ─────────────
-  #   (e.g. boot.wim.bak if someone ran a backup into the wrong directory)
+  # ── 4. Scrub non-boot files from sources\ before packing ──────────────────
+  #   Keep only boot.wim (and .sdi/.efi/.cat/.inf/.dll helpers).
+  #   Explicitly remove install.wim / install.esd — these are Windows setup images
+  #   (4-8 GB each) and must NOT be packed into the boot ISO.
+  foreach ($installImg in @('install.wim','install.esd')) {
+    $imgPath = Join-Path $isoSource "sources\$installImg"
+    if (Test-Path $imgPath) {
+      Write-BuildLog "  Removing $installImg from sources\ (not needed in boot ISO — saves GB of space)" -Level Info
+      Remove-Item $imgPath -Force
+    }
+  }
   Get-ChildItem (Join-Path $isoSource 'sources') -File | Where-Object { $_.Extension -notin @('.wim','.sdi','.efi','.cat','.inf','.dll') } | ForEach-Object {
     Write-BuildLog "  Removing stray file from sources\: $($_.Name)" -Level Info
     Remove-Item $_.FullName -Force
@@ -1813,6 +2434,64 @@ try {
   Mount-TargetWIM -WimPath "$bootWim" -Index $effectiveIndex
 
   Add-WinPE-Packages
+
+  # ── ADK Enhancement: inject components from install.wim ─────────────────
+  # Determine where to find install.wim:
+  #   1. -EnhanceFromISO: mount the provided ISO, extract install.wim to Cache, unmount
+  #   2. ISO mode (not -UseWinRE): install.wim is already in ISO_Source\sources\
+  #   3. WinRE mode without -EnhanceFromISO: log guidance, skip
+  $installWimForEnhancement = $null
+
+  if (-not [string]::IsNullOrWhiteSpace($EnhanceFromISO)) {
+    Write-BuildLog "Enhancement ISO provided: $EnhanceFromISO" -Level Info
+    Write-BuildLog "Mounting enhancement ISO to locate install.wim..." -Level Info
+    try {
+      Mount-DiskImage -ImagePath "$EnhanceFromISO" -ErrorAction Stop | Out-Null
+      $enhVol    = Get-DiskImage -ImagePath "$EnhanceFromISO" | Get-Volume
+      $enhLetter = $enhVol.DriveLetter
+      $enhInstallWim = "${enhLetter}:\sources\install.wim"
+      if (-not (Test-Path $enhInstallWim)) {
+        $enhInstallWim = "${enhLetter}:\sources\install.esd"
+      }
+      if (Test-Path $enhInstallWim) {
+        $cachedWim = Join-Path $Script:Config.Paths.Cache 'install_enhance.wim'
+        Write-BuildLog "  Copying install.wim from ISO to cache (this may take a minute)..." -Level Info
+        Copy-Item -LiteralPath $enhInstallWim -Destination $cachedWim -Force
+        $installWimForEnhancement = $cachedWim
+        Write-BuildLog "  install.wim cached: $cachedWim" -Level Info
+      } else {
+        Write-BuildLog "  install.wim not found in $EnhanceFromISO — enhancement skipped" -Level Warning
+      }
+    } catch {
+      Write-BuildLog "  Failed to mount enhancement ISO: $_ — enhancement skipped" -Level Warning
+    } finally {
+      Dismount-DiskImage -ImagePath "$EnhanceFromISO" -ErrorAction SilentlyContinue | Out-Null
+    }
+  } elseif (-not $UseWinRE) {
+    # ISO mode: install.wim was extracted together with the rest of the ISO
+    $isoInstallWim = Join-Path $Script:Config.Paths.ISO 'sources\install.wim'
+    $isoInstallEsd = Join-Path $Script:Config.Paths.ISO 'sources\install.esd'
+    if (Test-Path $isoInstallWim) {
+      Write-BuildLog "Auto-detected install.wim from ISO source: $isoInstallWim" -Level Info
+      $installWimForEnhancement = $isoInstallWim
+    } elseif (Test-Path $isoInstallEsd) {
+      Write-BuildLog "Auto-detected install.esd from ISO source (ESD may be encrypted): $isoInstallEsd" -Level Warning
+      $installWimForEnhancement = $isoInstallEsd
+    } else {
+      Write-BuildLog "install.wim not found in ISO source — enhancement skipped" -Level Warning
+      Write-BuildLog "  Tip: use -EnhanceFromISO <path> to supply a Windows ISO explicitly" -Level Warning
+    }
+  } else {
+    # WinRE mode: no ISO source available
+    Write-BuildLog "WinRE mode: no install.wim source. To run ADK enhancement, add:" -Level Warning
+    Write-BuildLog "  -EnhanceFromISO <path-to-windows.iso>" -Level Warning
+  }
+
+  if ($installWimForEnhancement) {
+    Invoke-ADKEnhancement -InstallWimPath $installWimForEnhancement -InstallIndex $InstallWimIndex
+  }
+  # ── End ADK Enhancement ──────────────────────────────────────────────────
+
   Add-DellDrivers
 
   # WiFi support: inject MDM DLLs, Intel WiFi drivers, WirelessConnect.exe
@@ -1860,6 +2539,17 @@ try {
   if ($IncludeExplorerPlus) { Write-Host "  [+] Explorer++ File Manager" -ForegroundColor Gray }
   if ($IncludeDellDrivers) { Write-Host "  [+] Dell WinPE11 Drivers (INF injected)" -ForegroundColor Gray }
   if ($WallpaperPath) { Write-Host "  [+] Custom Wallpaper" -ForegroundColor Gray }
+  if ($installWimForEnhancement) {
+    Write-Host "  [+] ADK Enhancement (install.wim component injection):" -ForegroundColor Gray
+    Write-Host "       Core DLLs, WiFi drivers, iSCSI MOFs, fonts" -ForegroundColor DarkGray
+    Write-Host "       PE registry: COM/CLSID, Svchost, LSA, TCP/IP, KnownDLLs merged" -ForegroundColor DarkGray
+    Write-Host "       PhoenixPE-aligned PE tweaks applied; scratch space $ScratchSpaceMB MB" -ForegroundColor DarkGray
+    if ($IncludeWoW64)  { Write-Host "       WoW64 (32-bit subsystem, ~150+ DLLs)" -ForegroundColor DarkGray }
+    if ($IncludeAudio)  { Write-Host "       Audio subsystem (WASAPI, audiodg, etc.)" -ForegroundColor DarkGray }
+    if ($IncludeShell)  { Write-Host "       Shell components (Explorer, DWM, XAML)" -ForegroundColor DarkGray }
+  } else {
+    Write-Host "  [ ] ADK Enhancement NOT run (no install.wim; add -EnhanceFromISO to enable)" -ForegroundColor DarkGray
+  }
   Write-Host "=========================================" -ForegroundColor Green
   Write-Host "`nBoot Instructions:" -ForegroundColor Yellow
   Write-Host "1. Write ISO to USB (Rufus/Ventoy) or mount in VM" -ForegroundColor White
