@@ -1677,13 +1677,15 @@ function Build-FinalISO {
   # reach 900 MB+, which causes bootmgr to fail with "Not enough memory
   # resources" when it tries to allocate that as a single contiguous ramdisk
   # at early-boot time — even if the machine has plenty of physical RAM.
-  # Re-exporting with /Compress:recovery recompresses everything and typically
+  # Re-exporting with /Compress:maximum (LZX) recompresses everything and typically
   # cuts the WIM to 40-60% of its committed size, keeping it bootable.
+  # IMPORTANT: Do NOT use /Compress:recovery — that uses LZMS compression which
+  # the WinPE boot loader (winload.efi) does not support; it will BSOD 0xc000000bb.
   $bootWimPath   = Join-Path $isoSource 'sources\boot.wim'
   $bootWimReexp  = Join-Path $Script:Config.Paths.Temp 'boot_reexport.wim'
-  Write-BuildLog "  Re-exporting WIM with recovery compression (reduces boot ramdisk size)..." -Level Info
+  Write-BuildLog "  Re-exporting WIM with maximum (LZX) compression (reduces boot ramdisk size)..." -Level Info
   $beforeMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB, 1)
-  & $Script:Config.Tools.DISM /Export-Image /SourceImageFile:"$bootWimPath" /SourceIndex:1 /DestinationImageFile:"$bootWimReexp" /Compress:recovery | Out-Null
+  & $Script:Config.Tools.DISM /Export-Image /SourceImageFile:"$bootWimPath" /SourceIndex:1 /DestinationImageFile:"$bootWimReexp" /Compress:maximum | Out-Null
   if ($LASTEXITCODE -eq 0 -and (Test-Path $bootWimReexp)) {
     Move-Item -LiteralPath $bootWimReexp -Destination $bootWimPath -Force
     $afterMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB, 1)
