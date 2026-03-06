@@ -1463,6 +1463,7 @@ function Create-StartupScript {
     throw "Critical path conversion error. Build cannot continue."
   }
 
+  #TODO:REWORK
   # ── Startup sequence (optimized) ───────────────────────────────────────────
   # 1. wpeinit: initializes all devices, network adapters, and storage
   #    (no need for separate wpeutil InitializeNetwork — wpeinit already does this)
