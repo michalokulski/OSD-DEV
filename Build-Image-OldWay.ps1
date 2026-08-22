@@ -1,5 +1,7 @@
+﻿# Optional customization paths — uncomment the -Wallpaper / -StartURL lines below to use them
 $PATH_Wallpaper = ""
 $PATH_URL = ""
+Write-Verbose "Optional paths: Wallpaper='$PATH_Wallpaper' URL='$PATH_URL'"
 
 Set-ExecutionPolicy RemoteSigned -Force
 Install-Module OSD

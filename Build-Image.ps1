@@ -177,7 +177,7 @@ param(
 
 # Validate: need either -SourceISO or -UseWinRE
 if (-not $UseWinRE -and [string]::IsNullOrWhiteSpace($SourceISO)) {
-    throw "You must supply either -SourceISO <path> or -UseWinRE (to use the local machine's winre.wim)."
+  throw "You must supply either -SourceISO <path> or -UseWinRE (to use the local machine's winre.wim)."
 }
 
 # ============================================
@@ -186,12 +186,12 @@ if (-not $UseWinRE -and [string]::IsNullOrWhiteSpace($SourceISO)) {
 # Install: Install-Module OSD  /  Update-Module OSD
 # ============================================
 try {
-    Import-Module OSD -MinimumVersion '23.0.0' -ErrorAction Stop
-    $Script:OSDAvailable = $true
-    Write-Host "[Init] OSD module loaded ($(( Get-Module OSD).Version))" -ForegroundColor DarkGray
+  Import-Module OSD -MinimumVersion '23.0.0' -ErrorAction Stop
+  $Script:OSDAvailable = $true
+  Write-Host "[Init] OSD module loaded ($(( Get-Module OSD).Version))" -ForegroundColor DarkGray
 } catch {
-    $Script:OSDAvailable = $false
-    Write-Host "[Init] OSD module not available — using built-in ADK detection fallback" -ForegroundColor Yellow
+  $Script:OSDAvailable = $false
+  Write-Host "[Init] OSD module not available — using built-in ADK detection fallback" -ForegroundColor Yellow
 }
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -280,8 +280,8 @@ $Script:WinPEPackages = @(
   "WinPE-WDS-Tools",
   # ── Extra packages not in OSD base but useful for this build ──
   "WinPE-Fonts-Legacy",
-  "WinPE-WiFi-Package",  # ADK for Windows 10 name
-  "WinPE-WiFi",           # ADK for Windows 11 alternate name; skipped if .cab absent
+  "WinPE-WiFi-Package",# ADK for Windows 10 name
+  "WinPE-WiFi",# ADK for Windows 11 alternate name; skipped if .cab absent
   "WinPE-SRT"
 )
 
@@ -385,14 +385,14 @@ function Initialize-BuildEnvironment {
     if (-not $adkPaths) { throw "OSD Get-WindowsAdkPaths returned nothing. Check that Windows ADK is installed." }
 
     $Script:Config.Tools = @{
-      DISM           = $adkPaths.dismexe
-      OSCDIMG        = $adkPaths.oscdimgexe
-      WinPEOCs       = $adkPaths.WinPEOCs
+      DISM = $adkPaths.dismexe
+      OSCDIMG = $adkPaths.oscdimgexe
+      WinPEOCs = $adkPaths.WinPEOCs
       # Boot sector files — returned directly by OSD; stored for Build-FinalISO
-      EtfsBootCom    = $adkPaths.etfsbootcom
+      EtfsBootCom = $adkPaths.EtfsBootCom
       EfiSysNoprompt = $adkPaths.efisysnopromptbin
       # ADK media root (amd64\Media) — used to build ISO source structure in WinRE mode
-      WinPEMedia     = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($adkPaths.WinPEOCs),"Media")
+      WinPEMedia = $adkPaths.PathWinPEMedia
     }
     Write-BuildLog "ADK via OSD: DISM=$($Script:Config.Tools.DISM)" -Level Info
     Write-BuildLog "ADK via OSD: OSCDIMG=$($Script:Config.Tools.OSCDIMG)" -Level Info
@@ -401,16 +401,20 @@ function Initialize-BuildEnvironment {
   } else {
     Write-BuildLog "OSD unavailable — probing ADK paths by well-known locations..." -Level Warning
     $progFiles86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-    $progFiles   = [Environment]::GetEnvironmentVariable("ProgramFiles")
+    $progFiles = [Environment]::GetEnvironmentVariable("ProgramFiles")
 
+    # NOTE: PS 5.1 cannot parse inline (if ...) expressions as array elements —
+    # build the candidate list imperatively for Windows PowerShell compatibility.
     $candidates = @()
-    foreach ($c in @(
-      $ADKPath,
-      (if ($progFiles86) { "$progFiles86\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment" }),
-      (if ($progFiles86) { "$progFiles86\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment" }),
-      (if ($progFiles)   { "$progFiles\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment" }),
-      (if ($progFiles)   { "$progFiles\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment" })
-    )) {
+    $adkCandidates = @()
+    if ($ADKPath) { $adkCandidates += $ADKPath }
+    foreach ($pf in @($progFiles86,$progFiles)) {
+      if ($pf) {
+        $adkCandidates += "$pf\Windows Kits\11\Assessment and Deployment Kit\Windows Preinstallation Environment"
+        $adkCandidates += "$pf\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
+      }
+    }
+    foreach ($c in $adkCandidates) {
       if ($c -and $c.Length -gt 3 -and (Test-Path $c) -and $candidates -notcontains $c) { $candidates += $c }
     }
 
@@ -419,18 +423,18 @@ function Initialize-BuildEnvironment {
     }
 
     $winpeAddOn = $candidates[0]
-    $adkRoot    = Split-Path -Path $winpeAddOn -Parent
+    $adkRoot = Split-Path -Path $winpeAddOn -Parent
     if ([string]::IsNullOrWhiteSpace($adkRoot)) { throw "ADK Root path is empty after Split-Path. WinPE path was: '$winpeAddOn'" }
 
     Write-BuildLog "ADK Root (fallback): $adkRoot" -Level Info
 
     $Script:Config.Tools = @{
-      DISM           = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\DISM\dism.exe")
-      OSCDIMG        = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\Oscdimg\oscdimg.exe")
-      WinPEOCs       = [System.IO.Path]::Combine($winpeAddOn,"amd64\WinPE_OCs")
-      EtfsBootCom    = $null   # will be resolved from ISO source at build time
+      DISM = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\DISM\dism.exe")
+      OSCDIMG = [System.IO.Path]::Combine($adkRoot,"Deployment Tools\amd64\Oscdimg\oscdimg.exe")
+      WinPEOCs = [System.IO.Path]::Combine($winpeAddOn,"amd64\WinPE_OCs")
+      EtfsBootCom = $null # will be resolved from ISO source at build time
       EfiSysNoprompt = $null
-      WinPEMedia     = [System.IO.Path]::Combine($winpeAddOn,"amd64\Media")
+      WinPEMedia = [System.IO.Path]::Combine($winpeAddOn,"amd64\Media")
     }
 
     if (-not (Test-Path $Script:Config.Tools.DISM)) {
@@ -447,7 +451,10 @@ function Initialize-BuildEnvironment {
     throw "WinPE optional components folder not found: $($Script:Config.Tools.WinPEOCs)`nEnsure Windows ADK with WinPE add-on is properly installed."
   }
 
-  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+  # TLS 1.2 is default on modern systems; forcing it is a no-op there. Failure is
+  # non-fatal — older stacks may not support the property assignment.
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
+  catch { Write-Verbose "TLS 1.2 enforcement skipped: $($_.Exception.Message)" }
   $Script:State = @{ Mounted = $false }
 
   Write-BuildLog "Build environment initialized" -Level "Success"
@@ -506,8 +513,8 @@ function Get-WinRESource {
     Write-BuildLog "Using OSD Copy-WinREWIM..." -Level Info
     try {
       $wimFile = Copy-WinREWIM -DestinationDirectory $stageDir `
-                               -DestinationFileName 'winre_extracted.wim' `
-                               -ErrorAction Stop
+         -DestinationFileName 'winre_extracted.wim' `
+         -ErrorAction Stop
       if ($wimFile -and (Test-Path $wimFile.FullName -ErrorAction SilentlyContinue)) {
         Write-BuildLog "Found winre.wim via OSD Copy-WinREWIM: $($wimFile.FullName)" -Level Success
         return $wimFile.FullName
@@ -519,10 +526,10 @@ function Get-WinRESource {
 
   # ── Tier 1: well-known accessible drive-letter paths ─────────────────────
   foreach ($c in @(
-    "$env:SystemRoot\System32\Recovery\Winre.wim",
-    "$env:SystemDrive\Recovery\WindowsRE\Winre.wim",
-    "$env:SystemDrive\Recovery\Winre.wim"
-  )) {
+      "$env:SystemRoot\System32\Recovery\Winre.wim",
+      "$env:SystemDrive\Recovery\WindowsRE\Winre.wim",
+      "$env:SystemDrive\Recovery\Winre.wim"
+    )) {
     if (Test-Path $c -ErrorAction SilentlyContinue) {
       Write-BuildLog "Found winre.wim (tier 1, known path): $c" -Level Success
       return $c
@@ -537,11 +544,11 @@ function Get-WinRESource {
   if (Test-Path $reagentXml -ErrorAction SilentlyContinue) {
     Write-BuildLog "Parsing ReAgent.xml for WinRE partition offset..." -Level Info
     try {
-      [xml]$xDoc  = Get-Content $reagentXml -Raw -ErrorAction Stop
-      $loc        = $xDoc.WindowsRE.WinreLocation
-      $wimFolder  = $loc.path      # folder on recovery partition, e.g. \Recovery\WindowsRE
+      [xml]$xDoc = Get-Content $reagentXml -Raw -ErrorAction Stop
+      $loc = $xDoc.WindowsRE.WinreLocation
+      $wimFolder = $loc.Path # folder on recovery partition, e.g. \Recovery\WindowsRE
       $partOffset = [long]$loc.offset
-      $diskId     = [long]$loc.id  # 0..n = disk number; >1000 = MBR disk signature
+      $diskId = [long]$loc.id # 0..n = disk number; >1000 = MBR disk signature
 
       # ── Tier 2: partition already has a drive letter ──────────────────────
       if ($wimFolder) {
@@ -563,15 +570,15 @@ function Get-WinRESource {
         $winrePart = $null
         if ($diskId -gt 1000) {
           $winrePart = Get-Disk |
-            Where-Object { $_.Signature -eq $diskId } |
-            Get-Partition |
-            Where-Object { $_.Offset -eq $partOffset } |
-            Select-Object -First 1
+          Where-Object { $_.Signature -eq $diskId } |
+          Get-Partition |
+          Where-Object { $_.offset -eq $partOffset } |
+          Select-Object -First 1
         } else {
           $winrePart = Get-Disk -Number $diskId -ErrorAction SilentlyContinue |
-            Get-Partition -ErrorAction SilentlyContinue |
-            Where-Object { $_.Offset -eq $partOffset } |
-            Select-Object -First 1
+          Get-Partition -ErrorAction SilentlyContinue |
+          Where-Object { $_.offset -eq $partOffset } |
+          Select-Object -First 1
         }
 
         if ($winrePart) {
@@ -582,9 +589,9 @@ function Get-WinRESource {
           } else {
             # Pick first free letter D..Z (OSD scans D→Z)
             $mountLetter = [char[]](68..90) |
-              Where-Object { (Get-PSDrive -ErrorAction SilentlyContinue).Name -notcontains ([string]$_) } |
-              Select-Object -First 1 |
-              ForEach-Object { [string]$_ }
+            Where-Object { (Get-PSDrive -ErrorAction SilentlyContinue).Name -notcontains ([string]$_) } |
+            Select-Object -First 1 |
+            ForEach-Object { [string]$_ }
           }
 
           if ($mountLetter) {
@@ -593,8 +600,8 @@ function Get-WinRESource {
               if (-not $hadDriveLetter) {
                 Write-BuildLog "Assigning drive letter ${mountLetter}: to recovery partition (Disk $($winrePart.DiskNumber) Partition $($winrePart.PartitionNumber))..." -Level Info
                 Set-Partition -DiskNumber $winrePart.DiskNumber `
-                              -PartitionNumber $winrePart.PartitionNumber `
-                              -NewDriveLetter $mountLetter -ErrorAction Stop
+                   -PartitionNumber $winrePart.PartitionNumber `
+                   -NewDriveLetter $mountLetter -ErrorAction Stop
                 Start-Sleep -Milliseconds 800
                 $needsCleanup = $true
               }
@@ -613,7 +620,7 @@ function Get-WinRESource {
               if ($foundOnPart) {
                 $destWim = Join-Path $stageDir 'winre_extracted.wim'
                 Write-BuildLog "Copying winre.wim from recovery partition via robocopy..." -Level Info
-                $srcDir  = Split-Path $foundOnPart
+                $srcDir = Split-Path $foundOnPart
                 robocopy "$srcDir" "$stageDir" 'winre.wim' /NFL /NDL /NJH /NJS /R:0 /W:0 | Out-Null
                 # Rename to expected filename if robocopy kept original name
                 $roboCopy = Join-Path $stageDir 'winre.wim'
@@ -629,8 +636,8 @@ function Get-WinRESource {
             } finally {
               if ($needsCleanup) {
                 Remove-PartitionAccessPath -DiskNumber $winrePart.DiskNumber `
-                  -PartitionNumber $winrePart.PartitionNumber `
-                  -AccessPath "${mountLetter}:\" -ErrorAction SilentlyContinue
+                   -PartitionNumber $winrePart.PartitionNumber `
+                   -AccessPath "${mountLetter}:\" -ErrorAction SilentlyContinue
               }
             }
           }
@@ -702,6 +709,7 @@ function Mount-SourceISO {
     }
 
     Write-BuildLog "WinRE WIM staged as sources\boot.wim" -Level Success
+    if (-not (Test-Path $bootWimDest)) { throw "boot.wim was not created at: $bootWimDest" }
     return $bootWimDest
 
   } else {
@@ -732,8 +740,8 @@ function Mount-SourceISO {
 #   - WirelessConnect.exe (GUI SSID selector, runs from X:\Windows\WirelessConnect.exe)
 function Add-WiFiSupport {
   Write-BuildLog "Injecting WiFi support..."
-  $mount  = $Script:Config.Paths.Mount
-  $sys32  = Join-Path $mount "Windows\System32"
+  $mount = $Script:Config.Paths.Mount
+  $sys32 = Join-Path $mount "Windows\System32"
   $winDir = Join-Path $mount "Windows"
 
   # ---------------------------------------------------------------
@@ -770,7 +778,7 @@ function Add-WiFiSupport {
       Write-BuildLog "Missing on build machine: $dll  (WiFi may not function without it)" -Level Warning
     }
   }
-  Write-BuildLog "Copied $dllsOk / $($dllsToInject.Count) WiFi DLLs" -Level $(if ($dllsOk -eq $dllsToInject.Count) {'Success'} else {'Warning'})
+  Write-BuildLog "Copied $dllsOk / $($dllsToInject.Count) WiFi DLLs" -Level $(if ($dllsOk -eq $dllsToInject.Count) { 'Success' } else { 'Warning' })
 
   # ---------------------------------------------------------------
   # Intel Wireless WinPE Driver Pack
@@ -810,7 +818,7 @@ function Add-WiFiSupport {
   $wcCache = Join-Path $Script:Config.Paths.Cache "WirelessConnect.exe"
   if (-not (Test-Path $wcCache)) {
     Write-BuildLog "Downloading WirelessConnect.exe..." -Level Info
-    Invoke-WebRequest -Uri $Script:AppSources.WirelessConnect -OutFile $wcCache -UseBasicParsing
+    Save-Download -Urls @($Script:AppSources.WirelessConnect) -OutFile $wcCache -Description "WirelessConnect.exe"
   }
   Copy-Item $wcCache (Join-Path $winDir "WirelessConnect.exe") -Force
   Write-BuildLog "WirelessConnect.exe → X:\Windows\WirelessConnect.exe" -Level Success
@@ -897,11 +905,11 @@ function Mount-TargetWIM {
 
 function Add-WinPE-Packages {
   Write-BuildLog "Installing WinPE optional components..."
-  $mount  = $Script:Config.Paths.Mount
+  $mount = $Script:Config.Paths.Mount
   $ocRoot = $Script:Config.Tools.WinPEOCs
-  $lang   = $Script:Config.Locale
+  $lang = $Script:Config.Locale
   if (-not (Test-Path ([System.IO.Path]::Combine($ocRoot,$lang)))) { $lang = 'en-us' }
-  $count  = 0
+  $count = 0
   $skipped = 0
 
   $packages = $Script:WinPEPackages.Clone()
@@ -911,7 +919,7 @@ function Add-WinPE-Packages {
   #   Add-WindowsPackage -Path (offline, NOT -Online) with $ErrorActionPreference = 'Ignore'
   #   No /IgnoreCheck — let DISM report real failures; missing .cab is silently skipped
   foreach ($pkg in $packages) {
-    $cab = [System.IO.Path]::Combine($ocRoot, "$pkg.cab")
+    $cab = [System.IO.Path]::Combine($ocRoot,"$pkg.cab")
     if (-not (Test-Path $cab)) {
       Write-BuildLog "  Package not found, skipping: $pkg" -Level Warning
       $skipped++
@@ -924,7 +932,7 @@ function Add-WinPE-Packages {
       Write-BuildLog "  Failed adding $pkg`: $_" -Level Warning
     }
     # Lang pack — silently skip if absent (OSD pattern)
-    $langCab = [System.IO.Path]::Combine($ocRoot, $lang, "${pkg}_${lang}.cab")
+    $langCab = [System.IO.Path]::Combine($ocRoot,$lang,"${pkg}_${lang}.cab")
     if (Test-Path $langCab) {
       try {
         Add-WindowsPackage -Path $mount -PackagePath $langCab -ErrorAction Stop | Out-Null
@@ -942,11 +950,12 @@ function Add-DellDrivers {
   if (-not $IncludeDellDrivers) { return }
 
   Write-BuildLog "Acquiring Dell WinPE11 drivers..."
-  $mount      = $Script:Config.Paths.Mount
+  $mount = $Script:Config.Paths.Mount
   $extractDir = [System.IO.Path]::Combine($Script:Config.Paths.Temp,"DellDrivers")
   New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
 
   # Prefer OSD catalog (Get-DellWinPEDriverPack returns the current version URL dynamically)
+  $osdDellOk = $false
   if ($Script:OSDAvailable) {
     Write-BuildLog "Using OSD Save-WinPECloudDriver -CloudDriver Dell (auto-latest URL)..." -Level Info
     try {
@@ -957,22 +966,24 @@ function Add-DellDrivers {
         if ($LASTEXITCODE -eq 0) {
           $Script:Config.Stats.DriversAdded += (Get-ChildItem -Path $driverFullPath -Filter *.inf -Recurse | Measure-Object).Count
           Write-BuildLog "Injected $($Script:Config.Stats.DriversAdded) Dell INF drivers (OSD catalog)" -Level Success
+          $osdDellOk = $true
         } else {
           Write-BuildLog "DISM /Add-Driver for Dell returned non-zero. Will try hardcoded CAB fallback." -Level Warning
         }
-        return
       }
     } catch {
       Write-BuildLog "OSD Save-WinPECloudDriver failed: $_ — falling back to hardcoded URL" -Level Warning
     }
   }
 
+  if ($osdDellOk) { return }
+
   # Fallback: hardcoded CAB URL (pinned to last known-good version)
   Write-BuildLog "Downloading Dell drivers from hardcoded URL..." -Level Info
   $dellCab = [System.IO.Path]::Combine($Script:Config.Paths.Cache,"Dell-WinPE11-Drivers.cab")
   if (-not (Test-Path $dellCab)) {
     try {
-      Invoke-WebRequest -Uri $Script:AppSources.DellWinPEDrivers -OutFile $dellCab -UseBasicParsing
+      Save-Download -Urls @($Script:AppSources.DellWinPEDrivers) -OutFile $dellCab -Description "Dell WinPE drivers"
     } catch {
       Write-BuildLog "Failed to download Dell drivers: $_" -Level Warning
       return
@@ -1002,7 +1013,7 @@ function Ensure-7z {
   New-Item -ItemType Directory -Force -Path $tools | Out-Null
   $sevenZr = Join-Path $tools "7zr.exe"
   if (-not (Test-Path $sevenZr)) {
-    Invoke-WebRequest -Uri $Script:AppSources.SevenZipMini -OutFile $sevenZr -UseBasicParsing
+    Save-Download -Urls @($Script:AppSources.SevenZipMini) -OutFile $sevenZr -Description "7zr.exe"
   }
   return $sevenZr
 }
@@ -1012,9 +1023,37 @@ function Expand-7z {
     [Parameter(Mandatory)] [string]$ArchivePath,
     [Parameter(Mandatory)] [string]$Destination
   )
+  if (-not (Test-Path $ArchivePath)) { throw "Archive not found: $ArchivePath" }
   $seven = Ensure-7z
   New-Item -ItemType Directory -Force -Path $Destination | Out-Null
   & $seven x "$ArchivePath" -o"$Destination" -y | Out-Null
+  # 7z exit codes: 0 = OK, 1 = warning (non-fatal), 2 = fatal. Treat >= 2 as failure.
+  if ($LASTEXITCODE -ge 2) {
+    throw "7z extraction failed for '$ArchivePath' (exit $LASTEXITCODE). Archive may be corrupted or incomplete."
+  }
+}
+
+function Find-ExeUnder { param([string]$Root,[string]$ExeName) if (-not (Test-Path $Root)) { return $null } Get-ChildItem -Path $Root -Recurse -File -Filter $ExeName -ErrorAction SilentlyContinue | Select-Object -First 1 }
+
+# Resilient download: tries each URL in order until one succeeds.
+# Removes the output file on failure so a truncated partial download never
+# poisons the Cache directory for subsequent build runs.
+function Save-Download {
+  param(
+    [Parameter(Mandatory)] [string[]]$Urls,
+    [Parameter(Mandatory)] [string]$OutFile,
+    [string]$Description = "file"
+  )
+  foreach ($u in $Urls) {
+    try {
+      Invoke-WebRequest -Uri $u -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+      return $true
+    } catch {
+      Write-BuildLog "  Download failed ($u): $($_.Exception.Message)" -Level Warning
+      Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+    }
+  }
+  throw "Could not download $Description from any source."
 }
 
 function Find-ExeUnder { param([string]$Root,[string]$ExeName) if (-not (Test-Path $Root)) { return $null } Get-ChildItem -Path $Root -Recurse -File -Filter $ExeName -ErrorAction SilentlyContinue | Select-Object -First 1 }
@@ -1036,7 +1075,7 @@ function Assert-ChromePlusLayout {
 # IMPORTANT: These files must NEVER be executed as a process — doing so triggers a real Chrome
 # installation on the host machine. We extract with 7z only (treat as a plain archive).
 function Expand-ChromeArchive {
-  param([string]$Archive, [string]$Dest)
+  param([string]$Archive,[string]$Dest)
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
   Expand-7z -ArchivePath $Archive -Destination $Dest
 }
@@ -1058,13 +1097,13 @@ function Get-Applications {
     #   3. Live download (URL contains a session token and may be expired)
     $scriptAppsDir = Join-Path (Split-Path -Parent $PSCommandPath) "Apps"
     $manualWx = $null
-    foreach ($searchDir in @($scriptAppsDir, $cache)) {
+    foreach ($searchDir in @($scriptAppsDir,$cache)) {
       if (-not (Test-Path $searchDir)) { continue }
       $manualWx = Get-ChildItem -Path $searchDir -Filter 'WinXShell*.7z' -ErrorAction SilentlyContinue |
-                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
       if (-not $manualWx) {
         $manualWx = Get-ChildItem -Path $searchDir -Filter 'WinXShell*.zip' -ErrorAction SilentlyContinue |
-                      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
       }
       if ($manualWx) { break }
     }
@@ -1099,7 +1138,7 @@ function Get-Applications {
       $parent = $parent.Parent
     }
   }
-  
+
   # VERIFICATION: Ensure WinXShell executable exists after extraction (Fix #2)
   $wxExe = Get-ChildItem -Path $wxDest -Recurse -Filter 'WinXShell_x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $wxExe) {
@@ -1107,7 +1146,7 @@ function Get-Applications {
     throw "WinXShell extraction failed or archive was corrupted. Build cannot continue."
   }
   Write-BuildLog "WinXShell verified and ready for injection" -Level Success
-  
+
   $Script:Config.Apps.WinXShell = $wxDest
 
   # --- 7-Zip (full portable for the image) ===
@@ -1115,7 +1154,7 @@ function Get-Applications {
   Write-BuildLog "Downloading 7-Zip portable..."
   $szDest = Join-Path $apps "7-Zip"
   New-Item -ItemType Directory -Force -Path $szDest | Out-Null
-  
+
   # Try to download and extract the 7z-extra.7z archive (contains portable binaries)
   $szExtra = Join-Path $cache "7z-extra.7z"
   if (-not (Test-Path $szExtra)) {
@@ -1129,14 +1168,14 @@ function Get-Applications {
         Write-BuildLog "  Retrying with SevenZipFull (SFX archive)..." -Level Info
         $szExe = Join-Path $cache "7z-full.exe"
         Invoke-WebRequest -Uri $Script:AppSources.SevenZipFull -OutFile $szExe -UseBasicParsing -ErrorAction Stop
-        $szExtra = $szExe  # Treat SFX executable as extractable archive
+        $szExtra = $szExe # Treat SFX executable as extractable archive
       } catch {
         Write-BuildLog "  Failed to download 7-Zip from any source: $_" -Level Error
         throw "Could not download 7-Zip. Check internet connection and sources."
       }
     }
   }
-  
+
   # Extract using 7zr.exe (ensured by Ensure-7z function)
   try {
     Write-BuildLog "  Extracting 7-Zip archive..." -Level Info
@@ -1146,24 +1185,23 @@ function Get-Applications {
     Write-BuildLog "  Failed to extract 7-Zip: $_" -Level Error
     throw "7-Zip extraction failed. Archive may be corrupted."
   }
-  
+
   # Verify 7-Zip binaries are present.
   # 7z-extra.7z contains 7za.exe (standalone console); 7z-full.exe SFX contains 7z.exe.
-  $sz7zExe  = Join-Path $szDest "7z.exe"
+  $sz7zExe = Join-Path $szDest "7z.exe"
   $sz7zaExe = Join-Path $szDest "7za.exe"
-  $sz7zX64  = Join-Path $szDest "x64\7z.exe"
+  $sz7zX64 = Join-Path $szDest "x64\7z.exe"
   if (-not (Test-Path $sz7zExe) -and -not (Test-Path $sz7zaExe) -and -not (Test-Path $sz7zX64)) {
     Write-BuildLog "  Warning: neither 7z.exe nor 7za.exe found after extraction — PATH entry may not resolve correctly" -Level Warning
   }
-  
-  $Script:Config.Apps.'7-Zip' = $szDest
+
+  $Script:Config.Apps. '7-Zip' = $szDest
   Write-BuildLog "7-Zip prepared for injection" -Level "Success"
 
   # --- IBM Semeru Java (prefer latest; fallback to prior) ---
   $jvZip = Join-Path $cache "Semeru.zip"
   if (-not (Test-Path $jvZip)) {
-    try { Invoke-WebRequest -Uri $Script:AppSources.SemeruPrimary -OutFile $jvZip -UseBasicParsing }
-    catch { Invoke-WebRequest -Uri $Script:AppSources.SemeruFallback -OutFile $jvZip -UseBasicParsing }
+    Save-Download -Urls @($Script:AppSources.SemeruPrimary,$Script:AppSources.SemeruFallback) -OutFile $jvZip -Description "IBM Semeru Java"
   }
   $javaRoot = Join-Path $apps "Java"
   Expand-Archive $jvZip $javaRoot -Force
@@ -1185,7 +1223,7 @@ function Get-Applications {
   if ($IncludeExplorerPlus) {
     $epZip = Join-Path $cache "ExplorerPP.zip"
     if (-not (Test-Path $epZip)) {
-      Invoke-WebRequest -Uri $Script:AppSources.ExplorerPlusPlus -OutFile $epZip -UseBasicParsing
+      Save-Download -Urls @($Script:AppSources.ExplorerPlusPlus) -OutFile $epZip -Description "Explorer++"
     }
     # Extract to a temp location, find explorer++.exe, copy it into the WinXShell dir
     $epTemp = Join-Path $Script:Config.Paths.Temp "ExplorerPP_extract"
@@ -1209,7 +1247,7 @@ function Get-Applications {
     Write-BuildLog "Downloading Chrome Plus (Chrome++)..."
     $cp7z = Join-Path $cache "ChromePlus.7z"
     if (-not (Test-Path $cp7z)) {
-      Invoke-WebRequest -Uri $Script:AppSources.ChromePlus -OutFile $cp7z -UseBasicParsing
+      Save-Download -Urls @($Script:AppSources.ChromePlus) -OutFile $cp7z -Description "Chrome++"
     }
     $chPath = Join-Path $apps "Chrome"
     Expand-7z -ArchivePath $cp7z -Destination $chPath
@@ -1357,8 +1395,8 @@ function Create-WinXShellConfig {
   if ($IncludeExplorerPlus -and $Script:Config.Apps.ExplorerPPExe) {
     # Pattern covers both quote styles and possible whitespace
     $jcfgContent = $jcfgContent -replace
-      '"#::第3方文件管理器"\s*:\s*"##\{JVAR_MODULEPATH\}\\\\explorer\+\+\.exe"',
-      '"::第3方文件管理器":"{JVAR_MODULEPATH}\\\\explorer++.exe"'
+    '"#::第3方文件管理器"\s*:\s*"##\{JVAR_MODULEPATH\}\\\\explorer\+\+\.exe"',
+    '"::第3方文件管理器":"{JVAR_MODULEPATH}\\\\explorer++.exe"'
     Write-BuildLog "  Explorer++ integration activated in winxshell.jcfg" -Level Info
   }
 
@@ -1370,8 +1408,8 @@ function Create-WinXShellConfig {
     $wallpaperRuntime = 'X:\\Windows\\Web\\Wallpaper\\RAMOS\\custom.jpg'
     # Try replacing an existing blank/commented file entry inside ::壁纸
     $newWall = $jcfgContent -replace
-      '("::壁纸"\s*:\s*\{[^}]*"file"\s*:\s*)"[^"]*"',
-      "`$1`"$wallpaperRuntime`""
+    '("::壁纸"\s*:\s*\{[^}]*"file"\s*:\s*)"[^"]*"',
+    "`$1`"$wallpaperRuntime`""
     if ($newWall -ne $jcfgContent) {
       $jcfgContent = $newWall
       Write-BuildLog "  Wallpaper path set in winxshell.jcfg (::壁纸)" -Level Info
@@ -1394,7 +1432,7 @@ function Inject-AllApps {
     # Skip entries that are file paths rather than app directories:
     #   ChromeExe     — path to chrome.exe inside the Chrome folder (already covered by 'Chrome')
     #   ExplorerPPExe — explorer++.exe was copied into the WinXShell folder; no separate dir to inject
-    if ($app.Key -in @('ChromeExe', 'ExplorerPPExe')) { continue }
+    if ($app.Key -in @('ChromeExe','ExplorerPPExe')) { continue }
     Write-BuildLog "Injecting: $($app.Key)"
     $dest = Join-Path $progFiles "$($app.Key)"
     New-Item -Path $dest -ItemType Directory -Force | Out-Null
@@ -1425,7 +1463,7 @@ function Configure-SystemRegistry {
   }
 
   Write-BuildLog "Configuring Registry (FBWF overlay size)…"
-  $mount   = $Script:Config.Paths.Mount
+  $mount = $Script:Config.Paths.Mount
   $sysPath = Join-Path $mount "Windows\System32\config\SYSTEM"
 
   # Force-unload any stale hive from a prior crashed build, then load fresh.
@@ -1452,11 +1490,11 @@ function Create-StartupScript {
   $wifiEnabled = ($UseWinRE -or $IncludeWiFi)
 
   # Find WinXShell runtime path (C:\ based) from what was injected into the WIM
-  $mountedBase  = Join-Path $mount 'Program Files\PortableApps'
-  $wxItem       = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell_x64.exe'
+  $mountedBase = Join-Path $mount 'Program Files\PortableApps'
+  $wxItem = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell_x64.exe'
   if (-not $wxItem) { $wxItem = Find-ExeUnder -Root (Join-Path $mountedBase 'WinXShell') -ExeName 'WinXShell.exe' }
-  $wxRuntime    = if ($wxItem) { $wxItem.FullName -replace [regex]::Escape($mount), 'X:' } else { $null }
-  
+  $wxRuntime = if ($wxItem) { $wxItem.FullName -replace [regex]::Escape($mount),'X:' } else { $null }
+
   # VALIDATION: Ensure path conversion from mount to X: drive succeeded (Fix #3)
   if ($wxRuntime -and -not $wxRuntime.StartsWith('X:\')) {
     Write-BuildLog "ERROR: WinXShell path conversion failed. Expected X:\ prefix, got: $wxRuntime" -Level Error
@@ -1485,7 +1523,9 @@ wpeutil DisableFirewall
     $content += @'
 
 REM === WiFi Initialization (OSD) ===
-PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnetUpdate } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
+REM Initialize-OSDCloudStartnet -WirelessConnect launches the SSID selector GUI when offline.
+REM Fallback (no OSD module in image): start WlanSvc and run WirelessConnect.exe directly.
+PowerShell -NoLogo -NonInteractive -Command "& { if (Get-Command Initialize-OSDCloudStartnet -ErrorAction Ignore) { Initialize-OSDCloudStartnet -WirelessConnect } else { net start WlanSvc 2>$null; Start-Sleep -Seconds 3; if (Test-Path X:\Windows\WirelessConnect.exe) { Start-Process X:\Windows\WirelessConnect.exe -Wait } } }"
 '@
   }
 
@@ -1596,7 +1636,7 @@ exit /b 0
 function Create-DesktopShortcuts {
   Write-BuildLog "Creating Desktop Custom Shortcuts..."
   $mount = $Script:Config.Paths.Mount
-  
+
   # Standard WinPE Desktop folders
   $desktopDirs = @(
     (Join-Path $mount "Users\Public\Desktop"),
@@ -1615,7 +1655,7 @@ function Create-DesktopShortcuts {
   # and Arguments contains the real command — necessary for .cmd/.bat targets because
   # non-Explorer shells (WinXShell) may not invoke .cmd files directly from .lnk.
   $createMultiLnk = {
-    param($Name, $Target, $Icon, $Arguments = "")
+    param($Name,$Target,$Icon,$Arguments = "")
     foreach ($d in $desktopDirs) {
       $lnkPath = Join-Path $d "$Name.lnk"
       $Shortcut = $WshShell.CreateShortcut($lnkPath)
@@ -1632,9 +1672,9 @@ function Create-DesktopShortcuts {
   if ($Script:Config.Apps.ChromeExe) {
     $buildAppsRoot = $Script:Config.Paths.Apps
     $runtimeAppsRoot = "X:\Program Files\PortableApps"
-    $chromeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot), $runtimeAppsRoot
+    $chromeRuntime = $Script:Config.Apps.ChromeExe -replace [regex]::Escape($buildAppsRoot),$runtimeAppsRoot
     # Use cmd.exe as the shortcut target; WinXShell (and all PE shells) can always launch cmd.exe.
-    &$createMultiLnk "Google Chrome" "cmd.exe" $chromeRuntime "/c `"X:\Windows\System32\RAMOS\StartChrome.cmd`""
+    & $createMultiLnk "Google Chrome" "cmd.exe" $chromeRuntime "/c `"X:\Windows\System32\RAMOS\StartChrome.cmd`""
   }
 
 }
@@ -1645,7 +1685,7 @@ function Write-Winpeshl {
   # OSD pattern: startnet.cmd launches WinXShell at the end — no winpeshl.ini needed.
   # Removing winpeshl.ini (or leaving it absent) causes WinPE to default to
   # cmd.exe /k startnet.cmd, which is exactly what we want.
-  $mount   = $Script:Config.Paths.Mount
+  $mount = $Script:Config.Paths.Mount
   $iniPath = Join-Path $mount 'Windows\System32\winpeshl.ini'
   if (Test-Path $iniPath) {
     Remove-Item $iniPath -Force
@@ -1660,10 +1700,10 @@ function Write-Winpeshl {
 function Build-FinalISO {
   Write-BuildLog "Building final ISO image..."
 
-  $mount       = $Script:Config.Paths.Mount
-  $isoSource   = $Script:Config.Paths.ISO
-  $outputDir   = $Script:Config.Paths.Output
-  $isoLabel    = [System.IO.Path]::GetFileNameWithoutExtension($OutputISOName)
+  $mount = $Script:Config.Paths.Mount
+  $isoSource = $Script:Config.Paths.ISO
+  $outputDir = $Script:Config.Paths.Output
+  $isoLabel = [System.IO.Path]::GetFileNameWithoutExtension($OutputISOName)
   $isoFullName = Join-Path $outputDir $OutputISOName
 
   # ── 1. Commit the WIM ─────────────────────────────────────────────────
@@ -1682,14 +1722,14 @@ function Build-FinalISO {
   # cuts the WIM to 40-60% of its committed size, keeping it bootable.
   # IMPORTANT: Do NOT use /Compress:recovery — that uses LZMS compression which
   # the WinPE boot loader (winload.efi) does not support; it will BSOD 0xc000000bb.
-  $bootWimPath   = Join-Path $isoSource 'sources\boot.wim'
-  $bootWimReexp  = Join-Path $Script:Config.Paths.Temp 'boot_reexport.wim'
+  $bootWimPath = Join-Path $isoSource 'sources\boot.wim'
+  $bootWimReexp = Join-Path $Script:Config.Paths.Temp 'boot_reexport.wim'
   Write-BuildLog "  Re-exporting WIM with maximum (LZX) compression (reduces boot ramdisk size)..." -Level Info
-  $beforeMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB, 1)
+  $beforeMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB,1)
   & $Script:Config.Tools.DISM /Export-Image /SourceImageFile:"$bootWimPath" /SourceIndex:1 /DestinationImageFile:"$bootWimReexp" /Compress:maximum | Out-Null
   if ($LASTEXITCODE -eq 0 -and (Test-Path $bootWimReexp)) {
     Move-Item -LiteralPath $bootWimReexp -Destination $bootWimPath -Force
-    $afterMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB, 1)
+    $afterMB = [math]::Round((Get-Item $bootWimPath).Length / 1MB,1)
     Write-BuildLog "  WIM size: ${beforeMB} MB → ${afterMB} MB (saved $([math]::Round($beforeMB - $afterMB, 1)) MB)" -Level Success
   } else {
     Write-BuildLog "  WIM re-export failed (exit $LASTEXITCODE) — ISO will use uncompressed WIM (may not boot on low-RAM machines)" -Level Warning
@@ -1699,7 +1739,7 @@ function Build-FinalISO {
   # ── 2. Verify ISO source layout ────────────────────────────────────────
   $bootDir = Join-Path $isoSource 'boot'
   $efiBoot = Join-Path $isoSource 'efi\microsoft\boot'
-  foreach ($dir in @($bootDir, $efiBoot)) {
+  foreach ($dir in @($bootDir,$efiBoot)) {
     if (-not (Test-Path $dir)) { throw "ISO source folder is missing required directory: $dir" }
   }
   $bootWim = Join-Path $isoSource 'sources\boot.wim'
@@ -1708,14 +1748,14 @@ function Build-FinalISO {
   # ── 3. Stage boot sector files into ISO source (OSD pattern) ──────────
   #   oscdimg's -bootdata: paths must survive quoting — easier to stage them
   #   inside the media tree so there are never spaces or special chars in the path.
-  $oscdimgDir         = Split-Path $Script:Config.Tools.OSCDIMG
-  $etfsbootcom_adk    = $Script:Config.Tools.EtfsBootCom
-  $efisys_adk         = Join-Path $oscdimgDir 'efisys.bin'
+  $oscdimgDir = Split-Path $Script:Config.Tools.OSCDIMG
+  $etfsbootcom_adk = $Script:Config.Tools.EtfsBootCom
+  $efisys_adk = Join-Path $oscdimgDir 'efisys.bin'
   $efisysnoprompt_adk = $Script:Config.Tools.EfiSysNoprompt
 
-  $destEtfsboot  = Join-Path $bootDir 'etfsboot.com'
-  $destEfisys    = Join-Path $efiBoot 'efisys.bin'
-  $destEfisysNP  = Join-Path $efiBoot 'efisys_noprompt.bin'
+  $destEtfsboot = Join-Path $bootDir 'etfsboot.com'
+  $destEfisys = Join-Path $efiBoot 'efisys.bin'
+  $destEfisysNP = Join-Path $efiBoot 'efisys_noprompt.bin'
 
   if (-not (Test-Path $destEtfsboot)) {
     if (-not (Test-Path $etfsbootcom_adk)) { throw "etfsboot.com not found at ADK path: $etfsbootcom_adk" }
@@ -1759,20 +1799,20 @@ function Build-FinalISO {
     Remove-Item $isoFullName -Force
   }
 
-  $oscdimgexe     = $Script:Config.Tools.OSCDIMG
+  $oscdimgexe = $Script:Config.Tools.OSCDIMG
   $isoLabelString = '-l"{0}"' -f $isoLabel
 
   Write-BuildLog "  oscdimg: $oscdimgexe" -Level Info
-  Write-BuildLog "  source:  $isoSource"  -Level Info
+  Write-BuildLog "  source:  $isoSource" -Level Info
   Write-BuildLog "  output:  $isoFullName" -Level Info
-  Write-BuildLog "  label:   $isoLabel"   -Level Info
+  Write-BuildLog "  label:   $isoLabel" -Level Info
 
   # Prefer efisys_noprompt.bin (no "press any key" prompt) — correct for unattended RAM OS
   if (Test-Path $destEfisysNP) {
-    $bootDataString = '2#p0,e,b"{0}"#pEF,e,b"{1}"' -f $destEtfsboot, $destEfisysNP
+    $bootDataString = '2#p0,e,b"{0}"#pEF,e,b"{1}"' -f $destEtfsboot,$destEfisysNP
     Write-BuildLog "  EFI boot: efisys_noprompt.bin (no prompt)" -Level Info
   } elseif (Test-Path $destEfisys) {
-    $bootDataString = '2#p0,e,b"{0}"#pEF,e,b"{1}"' -f $destEtfsboot, $destEfisys
+    $bootDataString = '2#p0,e,b"{0}"#pEF,e,b"{1}"' -f $destEtfsboot,$destEfisys
     Write-BuildLog "  EFI boot: efisys.bin (standard)" -Level Info
   } else {
     throw "No EFI boot sector file found in $efiBoot (tried efisys_noprompt.bin and efisys.bin)"
@@ -1782,8 +1822,8 @@ function Build-FinalISO {
   # Use Start-Process (matches OSD's New-WindowsAdkISO) — preserves embedded quotes
   # in -bootdata: argument that & operator would otherwise strip.
   $process = Start-Process $oscdimgexe `
-    -ArgumentList @('-m', '-o', '-u2', "-bootdata:$bootDataString", '-udfver102', $isoLabelString, "`"$isoSource`"", "`"$isoFullName`"") `
-    -PassThru -Wait -WindowStyle Hidden
+     -ArgumentList @('-m','-o','-u2',"-bootdata:$bootDataString",'-udfver102',$isoLabelString,"`"$isoSource`"","`"$isoFullName`"") `
+     -Passthru -Wait -WindowStyle Hidden
 
   if ($process.ExitCode -ne 0) {
     throw "OSCDIMG failed with exit code $($process.ExitCode)"
@@ -1794,7 +1834,7 @@ function Build-FinalISO {
   }
 
   $isoItem = Get-Item $isoFullName
-  Write-BuildLog ("ISO created: {0} ({1:N1} MB)" -f $isoFullName, ($isoItem.Length / 1MB)) -Level Success
+  Write-BuildLog ("ISO created: {0} ({1:N1} MB)" -f $isoFullName,($isoItem.Length / 1MB)) -Level Success
   return $isoFullName
 }
 
@@ -1806,7 +1846,9 @@ try {
 
   $bootWim = Mount-SourceISO
   # Backup the original WIM to Temp\ — NOT inside the ISO source tree (it would be packed into the ISO)
-  try { Copy-Item $bootWim (Join-Path $Script:Config.Paths.Temp 'boot.wim.bak') -Force } catch {}
+  # Backup failure is non-fatal: it exists purely for post-mortem debugging.
+  try { Copy-Item $bootWim (Join-Path $Script:Config.Paths.Temp 'boot.wim.bak') -Force }
+  catch { Write-BuildLog "boot.wim backup skipped: $($_.Exception.Message)" -Level Warning }
 
   # WinRE WIM always has exactly one image index; user-supplied WimIndex applies to ISO mode only
   $effectiveIndex = if ($UseWinRE) { 1 } else { $WimIndex }

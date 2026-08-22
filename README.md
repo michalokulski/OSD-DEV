@@ -1,7 +1,7 @@
 # OSD WinPE/RAM OS Builder
 
-**Version:** 1.4  
-**Date:** March 2026  
+**Version:** 1.5  
+**Date:** August 2026  
 **Status:** Experimental
 
 ## Overview
@@ -12,6 +12,8 @@ The build pipeline uses manual DISM/PowerShell scripting, enhanced with the [OSD
 - **Build-Image.ps1**: Modern, robust RAM OS builder. Two base WIM modes: traditional Windows ISO or local WinRE WIM. WinXShell + optional Explorer++ shell — no Microsoft `explorer.exe`.
 - **Build-Image-Kimi.ps1**: Alternative build script (Explorer++ as primary shell + optional Open-Shell Start Menu).
 - **Build-Image-OldWay.ps1**: Legacy OSDCloud-based build using OSD module cmdlets directly.
+
+See [AGENTS.md](AGENTS.md) for AI-agent coding conventions and critical domain rules. CI linting (PSScriptAnalyzer + PowerShell-Beautifier) runs on all `*.ps1` changes via `.github/workflows/lint.yml`.
 
 ## Scripts
 
@@ -33,7 +35,7 @@ Advanced RAM OS builder with two operating modes:
 #### Common features (both modes)
 - **No Microsoft `explorer.exe`** — shell is WinXShell (primary) + optional Explorer++ file manager, launched from `StartNet.cmd`. `winpeshl.ini` is removed so WinPE defaults to `cmd.exe /k StartNet.cmd` (OSD pattern).
 - **WinXShell desktop config** (`winxshell.jcfg`) is generated automatically, pointing the desktop at `X:\Users\Public\Desktop` and wiring in the wallpaper path when provided.
-- **WIM re-export with recovery compression** after `DISM /Commit` — re-compresses all injected content before packing into the ISO. Typically cuts WIM size from ~950 MB to ~450 MB, preventing the "Not enough memory resources" bootmgr error on physical hardware.
+- **WIM re-export with maximum (LZX) compression** after `DISM /Commit` — re-compresses all injected content before packing into the ISO. Typically cuts WIM size from ~950 MB to ~450 MB, preventing the "Not enough memory resources" bootmgr error on physical hardware. (`/Compress:recovery` is never used — LZMS breaks `winload.efi`.)
 - ADK detection via OSD `Get-WindowsAdkPaths` (registry-based) with path-guessing fallback.
 - Dell WinPE driver injection via OSD `Save-WinPECloudDriver -CloudDriver Dell` (auto-latest URL) with hardcoded-URL CAB fallback.
 - Intel WiFi WinPE driver injection via OSD `Save-WinPECloudDriver -CloudDriver WiFi`.
@@ -262,7 +264,9 @@ If the OSD module was not saved into WinPE, `StartNet.cmd` falls back to `net st
 
 ## Boot Ramdisk Size
 
-The WIM is re-exported with `DISM /Export-Image /Compress:recovery` after committing all changes. This is critical: without recompression, the uncommitted delta blocks leave the WIM at ~950 MB+, which causes bootmgr to fail with **"Not enough memory resources are available to process this command"** at early boot, even on machines with ample RAM (the issue is contiguous physical address availability before the memory manager starts, not total RAM).
+The WIM is re-exported with `DISM /Export-Image /Compress:maximum` (LZX) after committing all changes. This is critical: without recompression, the uncommitted delta blocks leave the WIM at ~950 MB+, which causes bootmgr to fail with **"Not enough memory resources are available to process this command"** at early boot, even on machines with ample RAM (the issue is contiguous physical address availability before the memory manager starts, not total RAM).
+
+> **Never use `/Compress:recovery` (LZMS)** on `boot.wim` — `winload.efi` cannot read LZMS-compressed images and will BSOD with `0xc000000bb`. Only `/Compress:max` / `maximum` (LZX) is safe for boot WIMs.
 
 After recompression, the WIM is typically ~450–550 MB — well within what any machine with ≥ 2 GB RAM can handle.
 

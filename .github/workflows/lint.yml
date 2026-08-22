@@ -1,0 +1,59 @@
+name: PowerShell Lint
+
+on:
+  push:
+    paths:
+      - '**.ps1'
+      - '**.psm1'
+  pull_request:
+    paths:
+      - '**.ps1'
+      - '**.psm1'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          # Exclude dev/ — it is a vendored clone of the OSD module (reference only,
+          # git-ignored) and would produce thousands of irrelevant findings.
+          $files = Get-ChildItem -Path . -Include *.ps1,*.psm1 -Recurse |
+            Where-Object { $_.FullName -notmatch '\\dev\\' }
+          if (-not $files) { Write-Host "No PowerShell files found."; exit 0 }
+          $results = $files | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_.FullName -Settings PSScriptAnalyzerSettings.psd1
+          }
+          if ($results) {
+            $results | Format-Table -AutoSize
+            Write-Host "::error::$($results.Count) PSScriptAnalyzer issue(s) found."
+            exit 1
+          }
+          Write-Host "No PSScriptAnalyzer issues found."
+
+      - name: Install PowerShell-Beautifier
+        shell: pwsh
+        run: Install-Module -Name PowerShell-Beautifier -Force -Scope CurrentUser
+
+      - name: Run PowerShell-Beautifier
+        shell: pwsh
+        run: |
+          # Same dev/ exclusion — never reformat the vendored OSD module clone.
+          $files = Get-ChildItem -Path . -Include *.ps1,*.psm1 -Recurse |
+            Where-Object { $_.FullName -notmatch '\\dev\\' }
+          foreach ($f in $files) { Edit-DTWBeautifyScript -SourcePath $f.FullName }
+          $diff = git diff --exit-code -- '*.ps1' '*.psm1'
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::PowerShell-Beautifier found formatting issues. Run Edit-DTWBeautifyScript locally."
+            git diff --stat
+            exit 1
+          }
+          Write-Host "All PowerShell files are properly formatted."
