@@ -1725,10 +1725,12 @@ function Invoke-ADKEnhancement {
         'wtsapi32.dll','wbemcomn.dll'
       )
       # NLS/KBD glob copies
+      # NOTE: destination is pre-computed into a variable — PowerShell-Beautifier
+      # mangles the inline `$_Prop (expr)` pattern by removing the space.
       Get-ChildItem -Path $iSysWOW -Filter 'C_*.NLS' -ErrorAction SilentlyContinue |
-        ForEach-Object { Copy-IfPresent $_.FullName (Join-Path $peSysWO $_.Name) | Out-Null }
+      ForEach-Object { $dst = Join-Path $peSysWO $_.Name; Copy-IfPresent $_.FullName $dst | Out-Null }
       Get-ChildItem -Path $iSysWOW -Filter 'KBD*.dll' -ErrorAction SilentlyContinue |
-        ForEach-Object { Copy-IfPresent $_.FullName (Join-Path $peSysWO $_.Name) | Out-Null }
+      ForEach-Object { $dst = Join-Path $peSysWO $_.Name; Copy-IfPresent $_.FullName $dst | Out-Null }
 
       $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
       $wowCopied = 0; $wowSkipped = 0
@@ -1743,7 +1745,7 @@ function Invoke-ADKEnhancement {
       if (Test-Path $wbemWow) {
         if (-not (Test-Path $peWbemWow)) { New-Item -ItemType Directory -Path $peWbemWow -Force | Out-Null }
         Get-ChildItem -Path $wbemWow -File -ErrorAction SilentlyContinue |
-          ForEach-Object { Copy-IfPresent $_.FullName (Join-Path $peWbemWow $_.Name) | Out-Null }
+        ForEach-Object { $dst = Join-Path $peWbemWow $_.Name; Copy-IfPresent $_.FullName $dst | Out-Null }
       }
       # SysWOW64 audio for 32-bit app compat (PhoenixPE 251-WoW64.script)
       foreach ($f in @('AudioSes.dll','MMDevAPI.dll','devenum.dll','quartz.dll','msdmo.dll','dsound.dll')) {
