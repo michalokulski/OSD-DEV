@@ -129,6 +129,33 @@ function Invoke-BuildModernMenu {
   }
 
   Write-Host ""
+  Write-Host "ADK Enhancement (injects DLLs, registry, subsystems from install.wim):" -ForegroundColor Yellow
+  if ($useWinRE) {
+    Write-Host "  WinRE mode: supply a Windows ISO to enable enhancement." -ForegroundColor Gray
+    Write-Host "Path to Windows ISO for ADK Enhancement (or Enter to skip):" -ForegroundColor Cyan
+    $enhIso = (Read-Host).Trim()
+    if ($enhIso -and (Test-Path $enhIso)) {
+      $params['EnhanceFromISO'] = $enhIso
+    } elseif ($enhIso) {
+      Write-Status "  ISO not found at '$enhIso' — ADK Enhancement will be skipped" -Type Warning
+    }
+  } else {
+    Write-Host "  ISO mode: install.wim will be auto-detected from source ISO." -ForegroundColor Gray
+    Write-Host "  Use -EnhanceFromISO only if you want a different Windows ISO as the component source." -ForegroundColor Gray
+    Write-Host "Override install.wim source ISO? (Enter path or press Enter to use source ISO):" -ForegroundColor Cyan
+    $enhIso = (Read-Host).Trim()
+    if ($enhIso -and (Test-Path $enhIso)) {
+      $params['EnhanceFromISO'] = $enhIso
+    } elseif ($enhIso) {
+      Write-Status "  ISO not found at '$enhIso' — will auto-detect from source ISO" -Type Warning
+    }
+  }
+  Write-Host "Include WoW64 (32-bit subsystem, ~150-300 MB, needed for 32-bit apps)? (Y/N):" -ForegroundColor Cyan
+  if ((Read-Host).Trim().ToUpper() -eq 'Y') { $params['IncludeWoW64'] = $true }
+  Write-Host "Include Audio subsystem? (Y/N):" -ForegroundColor Cyan
+  if ((Read-Host).Trim().ToUpper() -eq 'Y') { $params['IncludeAudio'] = $true }
+
+  Write-Host ""
   Write-Host "Summary:" -ForegroundColor Yellow
   if ($useWinRE) {
     Write-Host "  Mode:    WinRE (no ISO)" -ForegroundColor Gray
@@ -142,6 +169,9 @@ function Invoke-BuildModernMenu {
   Write-Host "  Dell Drivers: $( if ($params.ContainsKey('IncludeDellDrivers')) { 'Yes' } else { 'No' } )" -ForegroundColor Gray
   Write-Host "  Chrome++:     $( if ($params.ContainsKey('UseChromePlus')) { 'Yes' } else { 'No' } )" -ForegroundColor Gray
   Write-Host "  Explorer++:   $( if ($params.ContainsKey('IncludeExplorerPlus')) { 'Yes' } else { 'No' } )" -ForegroundColor Gray
+  Write-Host "  ADK Enh.:     $( if ($params.ContainsKey('EnhanceFromISO')) { "Yes (ISO: $($params['EnhanceFromISO']))" } elseif (-not $useWinRE) { 'Auto (from source ISO)' } else { 'No' } )" -ForegroundColor Gray
+  Write-Host "  WoW64:        $( if ($params.ContainsKey('IncludeWoW64')) { 'Yes' } else { 'No' } )" -ForegroundColor Gray
+  Write-Host "  Audio:        $( if ($params.ContainsKey('IncludeAudio')) { 'Yes' } else { 'No' } )" -ForegroundColor Gray
   Write-Host ""
   Write-Host -NoNewline "Proceed? (Y/N): "
   if ((Read-Host).Trim().ToUpper() -ne 'Y') {

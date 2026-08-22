@@ -350,6 +350,14 @@ Write-Host ""
 Write-Host "  INFO Chrome++: Use -UseChromePlus AND -ChromeOfflineInstallerPath <path>" -ForegroundColor Gray
 Write-Host "       (Chrome++ .7z does NOT include chrome.exe; offline installer required)" -ForegroundColor Gray
 Write-Host "  INFO Java: IBM Semeru 8 downloaded; JAVA_HOME and PATH auto-configured" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  INFO ADK Enhancement (optional, highly recommended for Chrome/Java compatibility):" -ForegroundColor Gray
+Write-Host "       ISO mode:   install.wim auto-detected from -SourceISO (no extra param needed)" -ForegroundColor Gray
+Write-Host "       WinRE mode: -EnhanceFromISO <windows-iso>  (required to enable enhancement)" -ForegroundColor Gray
+Write-Host "       -IncludeWoW64    32-bit subsystem (~150 DLLs; needed for 32-bit apps)" -ForegroundColor Gray
+Write-Host "       -IncludeAudio    WASAPI/audiodg audio stack from install.wim" -ForegroundColor Gray
+Write-Host "       -IncludeShell    Explorer, DWM, XAML shell components from install.wim" -ForegroundColor Gray
+Write-Host "       -ScratchSpaceMB  WinPE scratch RAM (default 512; valid: 32/64/128/256/512)" -ForegroundColor Gray
 
 Write-Host ""
 
