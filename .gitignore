@@ -3,3 +3,6 @@
 # Pre-staged application archives — tracked only by README
 Apps/*
 !Apps/README.md
+
+# Phantom submodule entry removed 2026-08-23 — was a gitlink to a non-configured repo
+ADK-Enchancer/

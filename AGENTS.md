@@ -37,10 +37,11 @@ Main flow in the `try` block at the bottom:
 5. `Add-WinPE-Packages` — OC cabs from `$Script:WinPEPackages` list (missing cabs skipped silently)
 6. `Add-DellDrivers` — OSD `Save-WinPECloudDriver -CloudDriver Dell` first, hardcoded CAB fallback
 7. `Add-WiFiSupport` + `Add-OSDModuleToWIM` — when `-UseWinRE` or `-IncludeWiFi`
-8. `Get-Applications` — downloads/extracts WinXShell, 7-Zip, Semeru Java, Explorer++, Chrome++
-9. `Create-WinXShellConfig` — patches shipped `winxshell.jcfg` (never replaces it)
-10. `Inject-AllApps` → registry/FBWF → PostShell.cmd → Chrome launcher → shortcuts → remove winpeshl.ini → `Create-StartupScript` (StartNet.cmd)
-11. `Build-FinalISO` — DISM commit → re-export WIM `/Compress:maximum` → stage boot sectors → oscdimg
+8. `Get-Applications` — downloads/extracts WinXShell, 7-Zip, Semeru Java, Explorer++, Chrome++, Sysinternals (local `Apps\SysinternalsSuite*.zip` only — no download URL)
+9. `Invoke-ADKEnhancement` — optional; mounts a full Windows `install.wim` read-only and copies real-OS components into WinPE (see below). Source ISO: auto-detected from `-SourceISO` in ISO mode; `-EnhanceFromISO` required in WinRE mode.
+10. `Create-WinXShellConfig` — patches shipped `winxshell.jcfg` (never replaces it)
+11. `Inject-AllApps` → registry/FBWF → PostShell.cmd → Chrome launcher → shortcuts → remove winpeshl.ini → `Create-StartupScript` (StartNet.cmd)
+12. `Build-FinalISO` — DISM commit → re-export WIM `/Compress:maximum` → stage boot sectors → oscdimg
 
 ## Critical Domain Knowledge (do not break these)
 
@@ -51,7 +52,7 @@ Main flow in the `try` block at the bottom:
 ### Shell / Boot chain
 - No Microsoft `explorer.exe`. Shell = WinXShell (+ Explorer++ as file manager inside the WinXShell folder).
 - `winpeshl.ini` must be absent so WinPE falls back to `cmd.exe /k StartNet.cmd`; StartNet.cmd ends with `start /wait "" "%WXSHELL%"`.
-- Chrome shortcut targets `cmd.exe /c StartChrome.cmd` because non-Explorer shells can't launch `.cmd` from `.lnk` directly.
+- Chrome shortcut targets the **full runtime path** `X:\Windows\System32\cmd.exe /c StartChrome.cmd` — a bare `cmd.exe` target makes WshShell bake the build machine's `C:\Windows\...` path into the .lnk.
 
 ### Chrome sources — NEVER execute installers
 Chrome program files come from 7z-SFX archives (`Bush2021/chrome_installer`, PortableApps paf.exe). These are **extracted with 7z only, never executed** — executing installs real Chrome on the host. Chrome++ itself only ships `version.dll`; validation requires `version.dll` next to `chrome.exe`.
@@ -65,6 +66,16 @@ The archive ships its own `winxshell.jcfg` using proprietary keys (`::文件管�
 
 ### oscdimg quoting
 Use `Start-Process -ArgumentList @(...)` (not `&`) so embedded quotes in `-bootdata:` survive. Prefer `efisys_noprompt.bin` (no "press any key").
+
+### ADK Enhancement (`Invoke-ADKEnhancement`)
+Optional pipeline that copies components from a full Windows `install.wim` into the mounted boot.wim to improve app compatibility:
+- **Step A Core** (always when enhancement runs): D3D11/DXGI, MSVC runtimes, CoreUI/UIAutomation DLLs
+- **Step B WoW64** (`-IncludeWoW64`): 32-bit subsystem from `SysWOW64` (~150–300 MB) — needed for 32-bit apps
+- **Step C Audio** (`-IncludeAudio`): WASAPI/audiodg stack
+- **Step D Shell** (`-IncludeShell`): Explorer/DWM/XAML components
+- **Step G Scratch**: `-ScratchSpaceMB` (default 512; valid: 32/64/128/256/512)
+- install.wim is mounted **read-only** from `Cache\`; never modify it. Stale enhancement mounts block subsequent builds like any other mount.
+- NOTE: there was once an `ADK-Enchancer` gitlink (submodule without `.gitmodules`, pointing at an unreachable commit) — removed 2026-08-23. The feature is fully self-contained in `Build-Image.ps1`; do not re-add the gitlink.
 
 ## Verified OSD Module API (v26.2.27.1)
 
